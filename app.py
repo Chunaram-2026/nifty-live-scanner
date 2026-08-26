@@ -1,9 +1,14 @@
 from flask import Flask, jsonify, request
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import os
 
 app = Flask(__name__)
+
+# =========================================================
+# INDEX SYMBOLS
+# =========================================================
 
 INDICES = {
     "NIFTY 50": "^NSEI",
@@ -12,32 +17,101 @@ INDICES = {
 }
 
 TIMEFRAMES = [
-    "1m", "2m", "3m", "5m",
-    "15m", "1h", "2h", "1d", "1wk"
+    "1m",
+    "2m",
+    "3m",
+    "5m",
+    "15m",
+    "1h",
+    "2h",
+    "1d",
+    "1wk"
 ]
 
 
+# =========================================================
+# TIMEFRAME SETTINGS
+# =========================================================
+
+def timeframe_settings(tf):
+
+    # Yahoo Finance limitations को ध्यान में रखकर
+    if tf == "1m":
+        return "1m", "7d", None
+
+    if tf == "2m":
+        return "2m", "60d", None
+
+    if tf == "3m":
+        # Yahoo में 3m direct नहीं है
+        # 1m data से 3m बनाया जाएगा
+        return "1m", "7d", "3min"
+
+    if tf == "5m":
+        return "5m", "60d", None
+
+    if tf == "15m":
+        return "15m", "60d", None
+
+    if tf == "1h":
+        return "1h", "730d", None
+
+    if tf == "2h":
+        # 1h से 2h बनाया जाएगा
+        return "1h", "730d", "2h"
+
+    if tf == "1d":
+        return "1d", "5y", None
+
+    if tf == "1wk":
+        return "1wk", "10y", None
+
+    return "5m", "60d", None
+
+
+# =========================================================
+# CLEAN YFINANCE DATA
+# =========================================================
+
 def clean_columns(data):
-    if data is None or data.empty:
+
+    if data is None:
         return None
 
+    if data.empty:
+        return None
+
+    # yfinance MultiIndex handling
     if isinstance(data.columns, pd.MultiIndex):
+
+        # पहले level में Open, High, Low, Close...
         data.columns = data.columns.get_level_values(0)
 
     required = ["Open", "High", "Low", "Close"]
 
     for col in required:
+
         if col not in data.columns:
             return None
 
     if "Volume" not in data.columns:
         data["Volume"] = 0
 
-    return data.dropna(subset=required)
+    data = data.dropna(subset=required)
+
+    return data
 
 
-def download_data(symbol, interval, period):
+# =========================================================
+# DOWNLOAD DATA
+# =========================================================
+
+def download_data(symbol, tf):
+
+    interval, period, resample_rule = timeframe_settings(tf)
+
     try:
+
         data = yf.download(
             symbol,
             period=period,
@@ -47,117 +121,213 @@ def download_data(symbol, interval, period):
             threads=False
         )
 
-        return clean_columns(data)
+        data = clean_columns(data)
 
-    except Exception:
-        return None
-
-
-def resample_data(data, rule):
-    if data is None or data.empty:
-        return None
-
-    try:
-        result = data.resample(rule).agg({
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Close": "last",
-            "Volume": "sum"
-        })
-
-        return result.dropna(subset=["Open", "High", "Low", "Close"])
-
-    except Exception:
-        return None
-
-
-def get_data(symbol, timeframe):
-
-    # 1 minute data is used as the base for
-    # 1m, 2m, 3m and 5m.
-    if timeframe in ["1m", "2m", "3m", "5m"]:
-
-        data = download_data(
-            symbol,
-            "1m",
-            "7d"
-        )
-
-        if data is None or data.empty:
+        if data is None:
             return None
 
-        if timeframe == "1m":
-            return data
+        # ---------------------------------------------
+        # 3 MINUTE / 2 HOUR RESAMPLING
+        # ---------------------------------------------
 
-        if timeframe == "2m":
-            return resample_data(data, "2min")
+        if resample_rule:
 
-        if timeframe == "3m":
-            return resample_data(data, "3min")
+            # timezone aware index को रहने दें
+            data = data.resample(resample_rule).agg({
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+                "Volume": "sum"
+            })
 
-        if timeframe == "5m":
-            return resample_data(data, "5min")
+            data = data.dropna(subset=[
+                "Open",
+                "High",
+                "Low",
+                "Close"
+            ])
 
+        return data
 
-    # 15 minute
-    if timeframe == "15m":
+    except Exception as e:
 
-        return download_data(
-            symbol,
-            "15m",
-            "60d"
-        )
+        print("DOWNLOAD ERROR:", e)
 
-
-    # 1 hour
-    if timeframe == "1h":
-
-        return download_data(
-            symbol,
-            "1h",
-            "730d"
-        )
+        return None
 
 
-    # 2 hour is created from 1 hour candles
-    if timeframe == "2h":
+# =========================================================
+# INDICATORS
+# =========================================================
 
-        data = download_data(
-            symbol,
-            "1h",
-            "730d"
-        )
-
-        return resample_data(data, "2h")
-
-
-    # Daily
-    if timeframe == "1d":
-
-        return download_data(
-            symbol,
-            "1d",
-            "5y"
-        )
-
-
-    # Weekly
-    if timeframe == "1wk":
-
-        return download_data(
-            symbol,
-            "1wk",
-            "10y"
-        )
-
-
-    return None
-
-
-def calculate_signal(data):
+def calculate_indicators(data):
 
     if data is None or data.empty:
+        return None
+
+    data = data.copy()
+
+    close = pd.to_numeric(
+        data["Close"],
+        errors="coerce"
+    )
+
+    high = pd.to_numeric(
+        data["High"],
+        errors="coerce"
+    )
+
+    low = pd.to_numeric(
+        data["Low"],
+        errors="coerce"
+    )
+
+    volume = pd.to_numeric(
+        data["Volume"],
+        errors="coerce"
+    ).fillna(0)
+
+    # =====================================================
+    # EMA 9
+    # =====================================================
+
+    data["EMA9"] = close.ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    # =====================================================
+    # EMA 15
+    # =====================================================
+
+    data["EMA15"] = close.ewm(
+        span=15,
+        adjust=False
+    ).mean()
+
+    # =====================================================
+    # TYPICAL PRICE
+    # =====================================================
+
+    typical_price = (
+        high + low + close
+    ) / 3
+
+    # =====================================================
+    # VWAP
+    #
+    # VWAP हर trading day पर reset होगा
+    # =====================================================
+
+    data["_date"] = data.index.date
+
+    cumulative_pv = (
+        typical_price * volume
+    ).groupby(data["_date"]).cumsum()
+
+    cumulative_volume = (
+        volume.groupby(data["_date"]).cumsum()
+    )
+
+    data["VWAP"] = np.where(
+        cumulative_volume > 0,
+        cumulative_pv / cumulative_volume,
+        typical_price
+    )
+
+    data.drop(
+        columns=["_date"],
+        inplace=True
+    )
+
+    return data
+
+
+# =========================================================
+# SIGNAL
+# =========================================================
+
+def get_signal(row):
+
+    price = row["Close"]
+    ema9 = row["EMA9"]
+    ema15 = row["EMA15"]
+    vwap = row["VWAP"]
+
+    if pd.isna(price):
+        return "NO DATA"
+
+    if pd.isna(ema9) or pd.isna(ema15):
+        return "WAIT"
+
+    if pd.isna(vwap):
+        return "WAIT"
+
+    # CALL BIAS
+    if (
+        price > vwap
+        and ema9 > ema15
+    ):
+        return "CALL"
+
+    # PUT BIAS
+    if (
+        price < vwap
+        and ema9 < ema15
+    ):
+        return "PUT"
+
+    return "WAIT"
+
+
+# =========================================================
+# SIGNAL MARKERS
+#
+# केवल signal बदलने पर marker लगाया जाएगा
+# =========================================================
+
+def add_signal_markers(data):
+
+    data = data.copy()
+
+    signals = []
+
+    previous = "WAIT"
+
+    for _, row in data.iterrows():
+
+        current = get_signal(row)
+
+        marker = ""
+
+        if current == "CALL" and previous != "CALL":
+            marker = "CALL"
+
+        elif current == "PUT" and previous != "PUT":
+            marker = "PUT"
+
+        signals.append(marker)
+
+        if current in ["CALL", "PUT"]:
+            previous = current
+
+        elif current == "WAIT":
+            previous = "WAIT"
+
+    data["MARKER"] = signals
+
+    return data
+
+
+# =========================================================
+# SCANNER
+# =========================================================
+
+def calculate_scanner(data):
+
+    if data is None or len(data) < 20:
+
         return {
             "signal": "NO DATA",
             "price": None,
@@ -166,418 +336,790 @@ def calculate_signal(data):
             "vwap": None
         }
 
-    if len(data) < 20:
+    data = calculate_indicators(data)
+
+    if data is None or data.empty:
+
         return {
-            "signal": "WAIT - LOW DATA",
+            "signal": "NO DATA",
             "price": None,
             "ema9": None,
             "ema15": None,
             "vwap": None
         }
 
-    try:
+    row = data.iloc[-1]
 
-        close = pd.to_numeric(
-            data["Close"],
-            errors="coerce"
+    signal = get_signal(row)
+
+    return {
+        "signal": (
+            "CALL BIAS"
+            if signal == "CALL"
+            else
+            "PUT BIAS"
+            if signal == "PUT"
+            else
+            "WAIT"
+        ),
+
+        "price": round(
+            float(row["Close"]),
+            2
+        ),
+
+        "ema9": round(
+            float(row["EMA9"]),
+            2
+        ),
+
+        "ema15": round(
+            float(row["EMA15"]),
+            2
+        ),
+
+        "vwap": round(
+            float(row["VWAP"]),
+            2
+        )
+    }
+
+
+# =========================================================
+# CHART DATA
+# =========================================================
+
+def chart_json(data):
+
+    if data is None or data.empty:
+        return []
+
+    result = []
+
+    for timestamp, row in data.iterrows():
+
+        try:
+
+            # Unix timestamp
+            ts = int(
+                pd.Timestamp(timestamp).timestamp()
+            )
+
+            result.append({
+
+                "time": ts,
+
+                "open": round(
+                    float(row["Open"]),
+                    2
+                ),
+
+                "high": round(
+                    float(row["High"]),
+                    2
+                ),
+
+                "low": round(
+                    float(row["Low"]),
+                    2
+                ),
+
+                "close": round(
+                    float(row["Close"]),
+                    2
+                ),
+
+                "ema9": round(
+                    float(row["EMA9"]),
+                    2
+                ),
+
+                "ema15": round(
+                    float(row["EMA15"]),
+                    2
+                ),
+
+                "vwap": round(
+                    float(row["VWAP"]),
+                    2
+                ),
+
+                "signal": get_signal(row),
+
+                "marker": row.get(
+                    "MARKER",
+                    ""
+                )
+            })
+
+        except Exception:
+            continue
+
+    return result
+
+
+# =========================================================
+# BACKTEST
+#
+# Logic:
+#
+# CALL:
+# Price > VWAP
+# EMA9 > EMA15
+#
+# PUT:
+# Price < VWAP
+# EMA9 < EMA15
+#
+# Entry अगली candle के Open पर
+# Exit opposite signal आने पर
+# =========================================================
+
+def run_backtest(data):
+
+    if data is None or data.empty:
+        return {
+            "trades": [],
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0,
+            "net_points": 0
+        }
+
+    data = calculate_indicators(data)
+
+    if data is None or len(data) < 20:
+
+        return {
+            "trades": [],
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0,
+            "net_points": 0
+        }
+
+    signals = []
+
+    for _, row in data.iterrows():
+        signals.append(
+            get_signal(row)
         )
 
-        high = pd.to_numeric(
-            data["High"],
-            errors="coerce"
+    data = data.copy()
+
+    data["Signal"] = signals
+
+    trades = []
+
+    position = None
+
+    entry_price = None
+
+    entry_time = None
+
+    position_type = None
+
+    for i in range(1, len(data)):
+
+        current_signal = data["Signal"].iloc[i]
+
+        current_open = float(
+            data["Open"].iloc[i]
         )
 
-        low = pd.to_numeric(
-            data["Low"],
-            errors="coerce"
+        current_close = float(
+            data["Close"].iloc[i]
         )
 
-        volume = pd.to_numeric(
-            data["Volume"],
-            errors="coerce"
-        ).fillna(0)
+        current_time = data.index[i]
 
-        valid = (
-            close.notna()
-            & high.notna()
-            & low.notna()
+        # =============================================
+        # ENTRY
+        # =============================================
+
+        if position is None:
+
+            if current_signal == "CALL":
+
+                position = "CALL"
+
+                position_type = "CALL"
+
+                entry_price = current_open
+
+                entry_time = current_time
+
+                continue
+
+            if current_signal == "PUT":
+
+                position = "PUT"
+
+                position_type = "PUT"
+
+                entry_price = current_open
+
+                entry_time = current_time
+
+                continue
+
+        # =============================================
+        # CALL EXIT
+        # =============================================
+
+        if position == "CALL":
+
+            if current_signal == "PUT":
+
+                exit_price = current_open
+
+                points = (
+                    exit_price - entry_price
+                )
+
+                trades.append({
+                    "type": "CALL",
+                    "entry": round(
+                        entry_price,
+                        2
+                    ),
+                    "exit": round(
+                        exit_price,
+                        2
+                    ),
+                    "points": round(
+                        points,
+                        2
+                    ),
+                    "result": (
+                        "WIN"
+                        if points > 0
+                        else "LOSS"
+                    ),
+                    "entry_time": str(
+                        entry_time
+                    ),
+                    "exit_time": str(
+                        current_time
+                    )
+                })
+
+                position = "PUT"
+
+                position_type = "PUT"
+
+                entry_price = current_open
+
+                entry_time = current_time
+
+        # =============================================
+        # PUT EXIT
+        # =============================================
+
+        elif position == "PUT":
+
+            if current_signal == "CALL":
+
+                exit_price = current_open
+
+                points = (
+                    entry_price - exit_price
+                )
+
+                trades.append({
+                    "type": "PUT",
+                    "entry": round(
+                        entry_price,
+                        2
+                    ),
+                    "exit": round(
+                        exit_price,
+                        2
+                    ),
+                    "points": round(
+                        points,
+                        2
+                    ),
+                    "result": (
+                        "WIN"
+                        if points > 0
+                        else "LOSS"
+                    ),
+                    "entry_time": str(
+                        entry_time
+                    ),
+                    "exit_time": str(
+                        current_time
+                    )
+                })
+
+                position = "CALL"
+
+                position_type = "CALL"
+
+                entry_price = current_open
+
+                entry_time = current_time
+
+    # =============================================
+    # LAST OPEN POSITION CLOSE
+    # =============================================
+
+    if position is not None and entry_price is not None:
+
+        last_price = float(
+            data["Close"].iloc[-1]
         )
 
-        close = close[valid]
-        high = high[valid]
-        low = low[valid]
-        volume = volume[valid]
+        last_time = data.index[-1]
 
-        if len(close) < 20:
-            return {
-                "signal": "NO DATA",
-                "price": None,
-                "ema9": None,
-                "ema15": None,
-                "vwap": None
-            }
+        if position == "CALL":
 
-        ema9 = close.ewm(
-            span=9,
-            adjust=False
-        ).mean()
-
-        ema15 = close.ewm(
-            span=15,
-            adjust=False
-        ).mean()
-
-        typical_price = (
-            high + low + close
-        ) / 3
-
-        # VWAP
-        cumulative_volume = volume.cumsum()
-
-        cumulative_value = (
-            typical_price * volume
-        ).cumsum()
-
-        if cumulative_volume.iloc[-1] > 0:
-
-            vwap = (
-                cumulative_value
-                / cumulative_volume
+            points = (
+                last_price - entry_price
             )
 
         else:
-            # Some index feeds provide zero volume.
-            # Use typical price as fallback.
-            vwap = typical_price
 
-        price = float(close.iloc[-1])
-        e9 = float(ema9.iloc[-1])
-        e15 = float(ema15.iloc[-1])
-        vw = float(vwap.iloc[-1])
+            points = (
+                entry_price - last_price
+            )
 
-        if price > vw and e9 > e15:
+        trades.append({
+            "type": position_type,
+            "entry": round(
+                entry_price,
+                2
+            ),
+            "exit": round(
+                last_price,
+                2
+            ),
+            "points": round(
+                points,
+                2
+            ),
+            "result": (
+                "WIN"
+                if points > 0
+                else "LOSS"
+            ),
+            "entry_time": str(
+                entry_time
+            ),
+            "exit_time": str(
+                last_time
+            )
+        })
 
-            signal = "CALL BIAS"
+    total_trades = len(trades)
 
-        elif price < vw and e9 < e15:
+    wins = sum(
+        1
+        for x in trades
+        if x["result"] == "WIN"
+    )
 
-            signal = "PUT BIAS"
+    losses = sum(
+        1
+        for x in trades
+        if x["result"] == "LOSS"
+    )
 
-        else:
+    net_points = sum(
+        x["points"]
+        for x in trades
+    )
 
-            signal = "WAIT"
+    if total_trades > 0:
 
-        return {
-            "signal": signal,
-            "price": round(price, 2),
-            "ema9": round(e9, 2),
-            "ema15": round(e15, 2),
-            "vwap": round(vw, 2)
-        }
+        win_rate = (
+            wins / total_trades
+        ) * 100
 
-    except Exception as e:
+    else:
 
-        return {
-            "signal": "DATA ERROR",
-            "price": None,
-            "ema9": None,
-            "ema15": None,
-            "vwap": None
-        }
+        win_rate = 0
 
+    return {
+
+        "trades": trades,
+
+        "total_trades": total_trades,
+
+        "wins": wins,
+
+        "losses": losses,
+
+        "win_rate": round(
+            win_rate,
+            2
+        ),
+
+        "net_points": round(
+            net_points,
+            2
+        )
+    }
+
+
+# =========================================================
+# HOME PAGE
+# =========================================================
 
 @app.route("/")
 def home():
 
-    html = """
-    <!DOCTYPE html>
-
-    <html>
-
-    <head>
-
-    <meta name="viewport"
-          content="width=device-width,initial-scale=1">
-
-    <title>Personal Scalping Scanner</title>
-
-    <style>
-
-    body {
-        background:#080c12;
-        color:white;
-        font-family:Arial,sans-serif;
-        padding:15px;
-        margin:0;
-    }
-
-    h1 {
-        font-size:22px;
-        margin-bottom:15px;
-    }
-
-    .tf {
-        display:flex;
-        gap:6px;
-        overflow-x:auto;
-        margin-bottom:15px;
-        padding-bottom:5px;
-    }
-
-    button {
-        padding:9px 13px;
-        border-radius:8px;
-        border:1px solid #39485b;
-        background:#17212d;
-        color:white;
-        white-space:nowrap;
-    }
+    html = r"""
+<!DOCTYPE html>
 
-    button.active {
-        background:#5b16a8;
-    }
+<html>
 
-    .card {
-        background:#111923;
-        border:1px solid #263241;
-        border-radius:12px;
-        padding:15px;
-        margin-bottom:12px;
-    }
+<head>
 
-    .value {
-        margin:7px 0;
-    }
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
 
-    .wait {
-        color:#ffd45a;
-    }
+<title>Personal Scalping Scanner</title>
 
-    .call {
-        color:#54dc9a;
-    }
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 
-    .put {
-        color:#ff6673;
-    }
+<style>
 
-    .error {
-        color:#ff6673;
-    }
+body {
 
-    </style>
+    background:#080c12;
 
-    </head>
+    color:white;
 
-    <body>
+    font-family:Arial,sans-serif;
 
-    <h1>⚡ Personal Scalping Scanner</h1>
+    padding:12px;
 
-    <div class="tf">
+    margin:0;
+}
 
-        <button id="b1m"
-                onclick="loadData('1m')">
-            1M
-        </button>
+h1 {
 
-        <button id="b2m"
-                onclick="loadData('2m')">
-            2M
-        </button>
+    font-size:22px;
 
-        <button id="b3m"
-                onclick="loadData('3m')">
-            3M
-        </button>
+    margin:10px 0 15px;
+}
 
-        <button id="b5m"
-                onclick="loadData('5m')">
-            5M
-        </button>
+h2 {
 
-        <button id="b15m"
-                onclick="loadData('15m')">
-            15M
-        </button>
+    font-size:19px;
 
-        <button id="b1h"
-                onclick="loadData('1h')">
-            1H
-        </button>
+    margin-top:25px;
+}
 
-        <button id="b2h"
-                onclick="loadData('2h')">
-            2H
-        </button>
+.card {
 
-        <button id="b1d"
-                onclick="loadData('1d')">
-            1D
-        </button>
+    background:#111923;
 
-        <button id="b1wk"
-                onclick="loadData('1wk')">
-            1W
-        </button>
+    border:1px solid #263241;
 
-    </div>
+    border-radius:12px;
 
-    <div id="result">
-        Loading 5M data...
-    </div>
+    padding:15px;
 
+    margin-bottom:12px;
+}
 
-    <script>
+.tf {
 
-    function loadData(tf) {
+    display:flex;
 
-        document.getElementById("result").innerHTML =
-            "Loading " + tf + " data...";
+    gap:6px;
 
-        document.querySelectorAll("button")
-            .forEach(function(btn) {
-                btn.classList.remove("active");
-            });
+    overflow:auto;
 
-        let selected =
-            document.getElementById("b" + tf);
+    margin-bottom:12px;
 
-        if (selected) {
-            selected.classList.add("active");
-        }
+    padding-bottom:5px;
+}
 
-        fetch("/api/scan?tf=" + tf)
+button {
 
-        .then(function(response) {
+    padding:9px 12px;
 
-            if (!response.ok) {
-                throw new Error("Server error");
-            }
+    border-radius:8px;
 
-            return response.json();
+    border:1px solid #39485b;
 
-        })
+    background:#17212d;
 
-        .then(function(data) {
+    color:white;
 
-            let html = "";
+    white-space:nowrap;
+}
 
-            for (const index in data) {
+button.active {
 
-                const x = data[index];
+    background:#6d28d9;
 
-                let cls = "wait";
+    border-color:#8b5cf6;
+}
 
-                if (x.signal &&
-                    x.signal.includes("CALL")) {
-                    cls = "call";
-                }
+.value {
 
-                if (x.signal &&
-                    x.signal.includes("PUT")) {
-                    cls = "put";
-                }
+    margin:6px 0;
+}
 
-                if (x.signal &&
-                    x.signal.includes("ERROR")) {
-                    cls = "error";
-                }
+.wait {
 
-                html += `
+    color:#ffd45a;
+}
 
-                <div class="card">
+.call {
 
-                    <h2>${index}</h2>
+    color:#54dc9a;
+}
 
-                    <div class="value">
-                    Price: ${x.price ?? "-"}
-                    </div>
+.put {
 
-                    <div class="value">
-                    EMA 9: ${x.ema9 ?? "-"}
-                    </div>
+    color:#ff6673;
+}
 
-                    <div class="value">
-                    EMA 15: ${x.ema15 ?? "-"}
-                    </div>
+#chart {
 
-                    <div class="value">
-                    VWAP: ${x.vwap ?? "-"}
-                    </div>
+    width:100%;
 
-                    <h3 class="${cls}">
-                    ${x.signal}
-                    </h3>
+    height:500px;
 
-                </div>
+    border-radius:10px;
 
-                `;
-            }
+    overflow:hidden;
 
-            document.getElementById("result")
-                .innerHTML = html;
+    background:#0d141d;
+}
 
-        })
+.stats {
 
-        .catch(function(error) {
+    display:grid;
 
-            document.getElementById("result")
-                .innerHTML =
-                '<div class="card error">' +
-                'DATA CONNECTION ERROR' +
-                '</div>';
+    grid-template-columns:
+        repeat(2,1fr);
 
-        });
+    gap:8px;
+}
 
-    }
+.stat {
 
-    loadData("5m");
+    background:#17212d;
 
-    </script>
+    padding:12px;
 
-    </body>
+    border-radius:8px;
+}
 
-    </html>
-    """
+.stat-title {
 
-    return html
+    font-size:12px;
 
+    color:#9ca3af;
+}
 
-@app.route("/api/scan")
-def api_scan():
+.stat-value {
 
-    timeframe = request.args.get(
-        "tf",
-        "5m"
-    )
+    font-size:18px;
 
-    if timeframe not in TIMEFRAMES:
-        timeframe = "5m"
+    margin-top:5px;
+}
 
-    result = {}
+.trade {
 
-    for name, symbol in INDICES.items():
+    border-bottom:
+        1px solid #263241;
 
-        data = get_data(
-            symbol,
-            timeframe
-        )
+    padding:8px 0;
 
-        result[name] = calculate_signal(data)
+    font-size:13px;
+}
 
-    return jsonify(result)
+</style>
 
+</head>
 
-if __name__ == "__main__":
+<body>
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
-    )
+<h1>⚡ Personal Scalping Scanner</h1>
 
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+
+<!-- =====================================================
+     SCANNER TIMEFRAME
+     ===================================================== -->
+
+<div class="tf">
+
+<button onclick="loadScanner('1m')">1M</button>
+
+<button onclick="loadScanner('2m')">2M</button>
+
+<button onclick="loadScanner('3m')">3M</button>
+
+<button onclick="loadScanner('5m')">5M</button>
+
+<button onclick="loadScanner('15m')">15M</button>
+
+<button onclick="loadScanner('1h')">1H</button>
+
+<button onclick="loadScanner('2h')">2H</button>
+
+<button onclick="loadScanner('1d')">1D</button>
+
+<button onclick="loadScanner('1wk')">1W</button>
+
+</div>
+
+
+<div id="result">
+
+Loading...
+
+</div>
+
+
+<!-- =====================================================
+     CHART
+     ===================================================== -->
+
+<h2>📊 Index Chart</h2>
+
+<div class="tf">
+
+<button
+id="btnNifty"
+onclick="loadChart('^NSEI','NIFTY 50')">
+
+NIFTY 50
+
+</button>
+
+<button
+id="btnBank"
+onclick="loadChart('^NSEBANK','BANK NIFTY')">
+
+BANK NIFTY
+
+</button>
+
+<button
+id="btnSensex"
+onclick="loadChart('^BSESN','SENSEX')">
+
+SENSEX
+
+</button>
+
+</div>
+
+
+<div class="tf">
+
+<button onclick="changeChartTF('1m')">
+1M
+</button>
+
+<button onclick="changeChartTF('2m')">
+2M
+</button>
+
+<button onclick="changeChartTF('3m')">
+3M
+</button>
+
+<button onclick="changeChartTF('5m')">
+5M
+</button>
+
+<button onclick="changeChartTF('15m')">
+15M
+</button>
+
+<button onclick="changeChartTF('1h')">
+1H
+</button>
+
+<button onclick="changeChartTF('2h')">
+2H
+</button>
+
+<button onclick="changeChartTF('1d')">
+1D
+</button>
+
+<button onclick="changeChartTF('1wk')">
+1W
+</button>
+
+</div>
+
+
+<div id="chart"></div>
+
+
+<!-- =====================================================
+     BACKTEST
+     ===================================================== -->
+
+<h2>🧪 Backtest</h2>
+
+<div class="card">
+
+<button onclick="runBacktest()">
+
+Run Backtest
+
+</button>
+
+<div
+id="backtestResult"
+style="margin-top:15px;">
+
+Backtest नहीं चला है।
+
+</div>
+
+</div>
+
+
+<script>
+
+
+// =======================================================
+// GLOBAL VARIABLES
+// =======================================================
+
+let currentSymbol = "^NSEI";
+
+let currentIndex = "NIFTY 50";
+
+let currentTF = "5m";
+
+let chart = null;
+
+let candleSeries = null;
+
+let ema9Series = null;
+
+let ema15Series = null;
+
+let vwapSeries = null;
+
+
+// =======================================================
+// SCANNER
+// =======================================================
+
+function loadScanner(tf) {
+
+    document.getElementById("result").innerHTML =
+        "Loading " + tf + "...";
+
+
+    fetch(
+        "/api/scan?tf=" +
+        encodeURICom
