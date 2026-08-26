@@ -9,13 +9,13 @@ INDICES = {
     "SENSEX": "^BSESN"
 }
 
-TIMEFRAMES = ["1m", "2m", "3m", "5m", "15m"]
+TIMEFRAMES = ["1m", "2m", "3m", "5m", "15m", "1h", "2h", "1d", "1wk"]
 
 
 def get_data(symbol, timeframe):
     data = yf.download(
         symbol,
-        period="5d",
+        period="7d",
         interval=timeframe,
         progress=False,
         auto_adjust=False
@@ -155,6 +155,10 @@ def home():
         <button onclick="loadData('3m')">3M</button>
         <button onclick="loadData('5m')">5M</button>
         <button onclick="loadData('15m')">15M</button>
+        <button onclick="loadData('1h')">1H</button>
+<button onclick="loadData('2h')">2H</button>
+<button onclick="loadData('1d')">1D</button>
+<button onclick="loadData('1wk')">1W</button>
     </div>
 
     <div id="result">5M data loading...</div>
