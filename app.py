@@ -35,7 +35,6 @@ TIMEFRAMES = [
 
 def timeframe_settings(tf):
 
-    # Yahoo Finance limitations को ध्यान में रखकर
     if tf == "1m":
         return "1m", "7d", None
 
@@ -43,8 +42,6 @@ def timeframe_settings(tf):
         return "2m", "60d", None
 
     if tf == "3m":
-        # Yahoo में 3m direct नहीं है
-        # 1m data से 3m बनाया जाएगा
         return "1m", "7d", "3min"
 
     if tf == "5m":
@@ -57,7 +54,6 @@ def timeframe_settings(tf):
         return "1h", "730d", None
 
     if tf == "2h":
-        # 1h से 2h बनाया जाएगा
         return "1h", "730d", "2h"
 
     if tf == "1d":
@@ -81,23 +77,26 @@ def clean_columns(data):
     if data.empty:
         return None
 
-    # yfinance MultiIndex handling
     if isinstance(data.columns, pd.MultiIndex):
-
-        # पहले level में Open, High, Low, Close...
         data.columns = data.columns.get_level_values(0)
 
-    required = ["Open", "High", "Low", "Close"]
+    required = [
+        "Open",
+        "High",
+        "Low",
+        "Close"
+    ]
 
     for col in required:
-
         if col not in data.columns:
             return None
 
     if "Volume" not in data.columns:
         data["Volume"] = 0
 
-    data = data.dropna(subset=required)
+    data = data.dropna(
+        subset=required
+    )
 
     return data
 
@@ -108,7 +107,8 @@ def clean_columns(data):
 
 def download_data(symbol, tf):
 
-    interval, period, resample_rule = timeframe_settings(tf)
+    interval, period, resample_rule = \
+        timeframe_settings(tf)
 
     try:
 
@@ -126,14 +126,15 @@ def download_data(symbol, tf):
         if data is None:
             return None
 
-        # ---------------------------------------------
-        # 3 MINUTE / 2 HOUR RESAMPLING
-        # ---------------------------------------------
+        # =================================================
+        # RESAMPLE 3 MIN / 2 HOUR
+        # =================================================
 
         if resample_rule:
 
-            # timezone aware index को रहने दें
-            data = data.resample(resample_rule).agg({
+            data = data.resample(
+                resample_rule
+            ).agg({
                 "Open": "first",
                 "High": "max",
                 "Low": "min",
@@ -141,18 +142,23 @@ def download_data(symbol, tf):
                 "Volume": "sum"
             })
 
-            data = data.dropna(subset=[
-                "Open",
-                "High",
-                "Low",
-                "Close"
-            ])
+            data = data.dropna(
+                subset=[
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close"
+                ]
+            )
 
         return data
 
     except Exception as e:
 
-        print("DOWNLOAD ERROR:", e)
+        print(
+            "DOWNLOAD ERROR:",
+            e
+        )
 
         return None
 
@@ -211,28 +217,34 @@ def calculate_indicators(data):
     # =====================================================
 
     typical_price = (
-        high + low + close
+        high +
+        low +
+        close
     ) / 3
 
     # =====================================================
     # VWAP
-    #
-    # VWAP हर trading day पर reset होगा
+    # Reset every trading day
     # =====================================================
 
     data["_date"] = data.index.date
 
     cumulative_pv = (
         typical_price * volume
-    ).groupby(data["_date"]).cumsum()
+    ).groupby(
+        data["_date"]
+    ).cumsum()
 
     cumulative_volume = (
-        volume.groupby(data["_date"]).cumsum()
+        volume
+        .groupby(data["_date"])
+        .cumsum()
     )
 
     data["VWAP"] = np.where(
         cumulative_volume > 0,
-        cumulative_pv / cumulative_volume,
+        cumulative_pv /
+        cumulative_volume,
         typical_price
     )
 
@@ -246,50 +258,88 @@ def calculate_indicators(data):
 
 # =========================================================
 # SIGNAL
+#
+# CALL:
+# Price > VWAP
+# EMA9 > EMA15
+# Current LOW sweeps previous LOW
+# Current CLOSE returns above previous LOW
+#
+# PUT:
+# Price < VWAP
+# EMA9 < EMA15
+# Current HIGH sweeps previous HIGH
+# Current CLOSE returns below previous HIGH
 # =========================================================
 
-# ============================================================
-# SIGNAL WITH EMA 9/15 + VWAP + LIQUIDITY SWEEP
-# ============================================================
+def get_signal(
+    row,
+    previous=None
+):
 
-def get_signal(row, previous=None):
+    try:
 
-    price = row["Close"]
-    ema9 = row["EMA9"]
-    ema15 = row["EMA15"]
-    vwap = row["VWAP"]
+        price = float(
+            row["Close"]
+        )
 
-    # Basic data check
+        ema9 = float(
+            row["EMA9"]
+        )
+
+        ema15 = float(
+            row["EMA15"]
+        )
+
+        vwap = float(
+            row["VWAP"]
+        )
+
+    except Exception:
+
+        return "WAIT"
+
     if pd.isna(price):
         return "NO DATA"
 
-    if pd.isna(ema9) or pd.isna(ema15):
+    if (
+        pd.isna(ema9)
+        or pd.isna(ema15)
+    ):
         return "WAIT"
 
     if pd.isna(vwap):
         return "WAIT"
 
-    # First candle - no previous candle available
     if previous is None:
         return "WAIT"
 
-    prev_high = previous["High"]
-    prev_low = previous["Low"]
+    try:
 
-    if pd.isna(prev_high) or pd.isna(prev_low):
+        prev_high = float(
+            previous["High"]
+        )
+
+        prev_low = float(
+            previous["Low"]
+        )
+
+    except Exception:
+
         return "WAIT"
 
-    # ========================================================
-    # BUY / CALL
-    # ========================================================
-    # 1. Price above VWAP
-    # 2. EMA 9 above EMA 15
-    # 3. Current candle sweeps previous LOW
-    # 4. Current candle closes back ABOVE previous LOW
-    # ========================================================
+    if (
+        pd.isna(prev_high)
+        or pd.isna(prev_low)
+    ):
+        return "WAIT"
+
+    # =====================================================
+    # BUY / CALL LIQUIDITY SWEEP
+    # =====================================================
 
     buy_sweep = (
-        row["Low"] < prev_low
+        float(row["Low"]) < prev_low
         and price > prev_low
     )
 
@@ -300,17 +350,12 @@ def get_signal(row, previous=None):
     ):
         return "CALL"
 
-    # ========================================================
-    # SELL / PUT
-    # ========================================================
-    # 1. Price below VWAP
-    # 2. EMA 9 below EMA 15
-    # 3. Current candle sweeps previous HIGH
-    # 4. Current candle closes back BELOW previous HIGH
-    # ========================================================
+    # =====================================================
+    # SELL / PUT LIQUIDITY SWEEP
+    # =====================================================
 
     sell_sweep = (
-        row["High"] > prev_high
+        float(row["High"]) > prev_high
         and price < prev_high
     )
 
@@ -324,17 +369,21 @@ def get_signal(row, previous=None):
     return "WAIT"
 
 
-# ============================================================
-# SIGNAL MARKERS
-# ============================================================
+# =========================================================
+# ADD SIGNAL MARKERS
+# =========================================================
 
 def add_signal_markers(data):
+
+    if data is None or data.empty:
+        return data
 
     data = data.copy()
 
     signals = []
 
     previous_signal = "WAIT"
+
     previous_row = None
 
     for _, row in data.iterrows():
@@ -346,14 +395,14 @@ def add_signal_markers(data):
 
         marker = ""
 
-        # CALL marker only when new CALL appears
+        # New CALL only
         if (
             current == "CALL"
             and previous_signal != "CALL"
         ):
             marker = "CALL"
 
-        # PUT marker only when new PUT appears
+        # New PUT only
         elif (
             current == "PUT"
             and previous_signal != "PUT"
@@ -362,19 +411,45 @@ def add_signal_markers(data):
 
         signals.append(marker)
 
-        # Update previous signal
-        if current in ["CALL", "PUT"]:
+        # Update signal state
+        if current in [
+            "CALL",
+            "PUT"
+        ]:
+
             previous_signal = current
 
         elif current == "WAIT":
+
             previous_signal = "WAIT"
 
-        # Update previous candle
         previous_row = row
 
     data["MARKER"] = signals
 
     return data
+
+
+# =========================================================
+# CALCULATE ALL SIGNALS
+# =========================================================
+
+def calculate_all_signals(data):
+
+    if data is None or data.empty:
+        return None
+
+    data = calculate_indicators(
+        data
+    )
+
+    if data is None or data.empty:
+        return None
+
+    return add_signal_markers(
+        data
+    )
+
 
 # =========================================================
 # SCANNER
@@ -382,7 +457,10 @@ def add_signal_markers(data):
 
 def calculate_scanner(data):
 
-    if data is None or len(data) < 20:
+    if (
+        data is None
+        or len(data) < 20
+    ):
 
         return {
             "signal": "NO DATA",
@@ -392,9 +470,14 @@ def calculate_scanner(data):
             "vwap": None
         }
 
-    data = calculate_indicators(data)
+    data = calculate_all_signals(
+        data
+    )
 
-    if data is None or data.empty:
+    if (
+        data is None
+        or data.empty
+    ):
 
         return {
             "signal": "NO DATA",
@@ -406,18 +489,29 @@ def calculate_scanner(data):
 
     row = data.iloc[-1]
 
-    signal = get_signal(row)
+    previous = (
+        data.iloc[-2]
+        if len(data) >= 2
+        else None
+    )
+
+    signal = get_signal(
+        row,
+        previous
+    )
+
+    if signal == "CALL":
+        bias = "CALL"
+
+    elif signal == "PUT":
+        bias = "PUT"
+
+    else:
+        bias = "WAIT"
 
     return {
-        "signal": (
-            "CALL BIAS"
-            if signal == "CALL"
-            else
-            "PUT BIAS"
-            if signal == "PUT"
-            else
-            "WAIT"
-        ),
+
+        "signal": bias,
 
         "price": round(
             float(row["Close"]),
@@ -437,28 +531,64 @@ def calculate_scanner(data):
         "vwap": round(
             float(row["VWAP"]),
             2
+        ),
+
+        "time": str(
+            data.index[-1]
         )
     }
 
 
 # =========================================================
-# CHART DATA
+# CHART JSON
 # =========================================================
 
 def chart_json(data):
 
-    if data is None or data.empty:
+    if (
+        data is None
+        or data.empty
+    ):
+        return []
+
+    data = calculate_all_signals(
+        data
+    )
+
+    if data is None:
         return []
 
     result = []
 
-    for timestamp, row in data.iterrows():
+    for i, (
+        timestamp,
+        row
+    ) in enumerate(
+        data.iterrows()
+    ):
 
         try:
 
-            # Unix timestamp
             ts = int(
-                pd.Timestamp(timestamp).timestamp()
+                pd.Timestamp(
+                    timestamp
+                ).timestamp()
+            )
+
+            previous = (
+                data.iloc[i - 1]
+                if i > 0
+                else None
+            )
+
+            signal = get_signal(
+                row,
+                previous
+            )
+
+            marker = row.get(
+                "MARKER",
+                ""
             )
 
             result.append({
@@ -500,15 +630,18 @@ def chart_json(data):
                     2
                 ),
 
-                "signal": get_signal(row),
+                "signal": signal,
 
-                "marker": row.get(
-                    "MARKER",
-                    ""
-                )
+                "marker": marker
             })
 
-        except Exception:
+        except Exception as e:
+
+            print(
+                "CHART ROW ERROR:",
+                e
+            )
+
             continue
 
     return result
@@ -517,23 +650,18 @@ def chart_json(data):
 # =========================================================
 # BACKTEST
 #
-# Logic:
-#
-# CALL:
-# Price > VWAP
-# EMA9 > EMA15
-#
-# PUT:
-# Price < VWAP
-# EMA9 < EMA15
-#
-# Entry अगली candle के Open पर
-# Exit opposite signal आने पर
+# Signal candle पर signal बनता है.
+# Entry अगली candle के OPEN पर.
+# Exit opposite signal की अगली candle OPEN पर.
 # =========================================================
 
 def run_backtest(data):
 
-    if data is None or data.empty:
+    if (
+        data is None
+        or data.empty
+    ):
+
         return {
             "trades": [],
             "total_trades": 0,
@@ -543,9 +671,14 @@ def run_backtest(data):
             "net_points": 0
         }
 
-    data = calculate_indicators(data)
+    data = calculate_all_signals(
+        data
+    )
 
-    if data is None or len(data) < 20:
+    if (
+        data is None
+        or len(data) < 20
+    ):
 
         return {
             "trades": [],
@@ -558,10 +691,20 @@ def run_backtest(data):
 
     signals = []
 
+    previous = None
+
     for _, row in data.iterrows():
-        signals.append(
-            get_signal(row)
+
+        signal = get_signal(
+            row,
+            previous
         )
+
+        signals.append(
+            signal
+        )
+
+        previous = row
 
     data = data.copy()
 
@@ -577,153 +720,179 @@ def run_backtest(data):
 
     position_type = None
 
-    for i in range(1, len(data)):
+    # =====================================================
+    # SIGNAL CANDLE -> NEXT CANDLE OPEN ENTRY
+    # =====================================================
 
-        current_signal = data["Signal"].iloc[i]
+    for i in range(
+        0,
+        len(data) - 1
+    ):
 
-        current_open = float(
-            data["Open"].iloc[i]
+        signal = data[
+            "Signal"
+        ].iloc[i]
+
+        next_open = float(
+            data["Open"].iloc[i + 1]
         )
 
-        current_close = float(
-            data["Close"].iloc[i]
-        )
+        next_time = data.index[i + 1]
 
-        current_time = data.index[i]
-
-        # =============================================
-        # ENTRY
-        # =============================================
+        # =================================================
+        # NO POSITION
+        # =================================================
 
         if position is None:
 
-            if current_signal == "CALL":
+            if signal == "CALL":
 
                 position = "CALL"
 
                 position_type = "CALL"
 
-                entry_price = current_open
+                entry_price = next_open
 
-                entry_time = current_time
+                entry_time = next_time
 
                 continue
 
-            if current_signal == "PUT":
+            if signal == "PUT":
 
                 position = "PUT"
 
                 position_type = "PUT"
 
-                entry_price = current_open
+                entry_price = next_open
 
-                entry_time = current_time
+                entry_time = next_time
 
                 continue
 
-        # =============================================
-        # CALL EXIT
-        # =============================================
+        # =================================================
+        # CALL -> PUT
+        # =================================================
 
         if position == "CALL":
 
-            if current_signal == "PUT":
+            if signal == "PUT":
 
-                exit_price = current_open
+                exit_price = next_open
 
                 points = (
-                    exit_price - entry_price
+                    exit_price -
+                    entry_price
                 )
 
                 trades.append({
+
                     "type": "CALL",
+
                     "entry": round(
                         entry_price,
                         2
                     ),
+
                     "exit": round(
                         exit_price,
                         2
                     ),
+
                     "points": round(
                         points,
                         2
                     ),
+
                     "result": (
                         "WIN"
                         if points > 0
                         else "LOSS"
                     ),
+
                     "entry_time": str(
                         entry_time
                     ),
+
                     "exit_time": str(
-                        current_time
+                        next_time
                     )
                 })
 
+                # Reverse position
                 position = "PUT"
 
                 position_type = "PUT"
 
-                entry_price = current_open
+                entry_price = next_open
 
-                entry_time = current_time
+                entry_time = next_time
 
-        # =============================================
-        # PUT EXIT
-        # =============================================
+        # =================================================
+        # PUT -> CALL
+        # =================================================
 
         elif position == "PUT":
 
-            if current_signal == "CALL":
+            if signal == "CALL":
 
-                exit_price = current_open
+                exit_price = next_open
 
                 points = (
-                    entry_price - exit_price
+                    entry_price -
+                    exit_price
                 )
 
                 trades.append({
+
                     "type": "PUT",
+
                     "entry": round(
                         entry_price,
                         2
                     ),
+
                     "exit": round(
                         exit_price,
                         2
                     ),
+
                     "points": round(
                         points,
                         2
                     ),
+
                     "result": (
                         "WIN"
                         if points > 0
                         else "LOSS"
                     ),
+
                     "entry_time": str(
                         entry_time
                     ),
+
                     "exit_time": str(
-                        current_time
+                        next_time
                     )
                 })
 
+                # Reverse position
                 position = "CALL"
 
                 position_type = "CALL"
 
-                entry_price = current_open
+                entry_price = next_open
 
-                entry_time = current_time
+                entry_time = next_time
 
-    # =============================================
-    # LAST OPEN POSITION CLOSE
-    # =============================================
+    # =====================================================
+    # CLOSE LAST OPEN POSITION
+    # =====================================================
 
-    if position is not None and entry_price is not None:
+    if (
+        position is not None
+        and entry_price is not None
+    ):
 
         last_price = float(
             data["Close"].iloc[-1]
@@ -734,43 +903,58 @@ def run_backtest(data):
         if position == "CALL":
 
             points = (
-                last_price - entry_price
+                last_price -
+                entry_price
             )
 
         else:
 
             points = (
-                entry_price - last_price
+                entry_price -
+                last_price
             )
 
         trades.append({
+
             "type": position_type,
+
             "entry": round(
                 entry_price,
                 2
             ),
+
             "exit": round(
                 last_price,
                 2
             ),
+
             "points": round(
                 points,
                 2
             ),
+
             "result": (
                 "WIN"
                 if points > 0
                 else "LOSS"
             ),
+
             "entry_time": str(
                 entry_time
             ),
+
             "exit_time": str(
                 last_time
             )
         })
 
-    total_trades = len(trades)
+    # =====================================================
+    # STATISTICS
+    # =====================================================
+
+    total_trades = len(
+        trades
+    )
 
     wins = sum(
         1
@@ -792,7 +976,8 @@ def run_backtest(data):
     if total_trades > 0:
 
         win_rate = (
-            wins / total_trades
+            wins /
+            total_trades
         ) * 100
 
     else:
@@ -803,21 +988,26 @@ def run_backtest(data):
 
         "trades": trades,
 
-        "total_trades": total_trades,
+        "total_trades":
+            total_trades,
 
-        "wins": wins,
+        "wins":
+            wins,
 
-        "losses": losses,
+        "losses":
+            losses,
 
-        "win_rate": round(
-            win_rate,
-            2
-        ),
+        "win_rate":
+            round(
+                win_rate,
+                2
+            ),
 
-        "net_points": round(
-            net_points,
-            2
-        )
+        "net_points":
+            round(
+                net_points,
+                2
+            )
     }
 
 
@@ -831,55 +1021,70 @@ def home():
     html = r"""
 <!DOCTYPE html>
 
-<html>
+<html lang="en">
 
 <head>
 
+<meta charset="UTF-8">
+
 <meta name="viewport"
-      content="width=device-width,initial-scale=1">
+content="width=device-width,initial-scale=1">
 
-<title>Personal Scalping Scanner</title>
+<title>
+Personal Scalping Scanner
+</title>
 
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script src=
+"https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js">
+</script>
 
 <style>
+
+* {
+    box-sizing:border-box;
+}
 
 body {
 
     background:#080c12;
 
-    color:white;
+    color:#ffffff;
 
-    font-family:Arial,sans-serif;
-
-    padding:12px;
+    font-family:
+    Arial,
+    sans-serif;
 
     margin:0;
+
+    padding:12px;
 }
 
 h1 {
 
     font-size:22px;
 
-    margin:10px 0 15px;
+    margin:
+    8px 0 15px;
 }
 
 h2 {
 
-    font-size:19px;
+    font-size:18px;
 
-    margin-top:25px;
+    margin:
+    20px 0 10px;
 }
 
 .card {
 
     background:#111923;
 
-    border:1px solid #263241;
+    border:
+    1px solid #263241;
 
     border-radius:12px;
 
-    padding:15px;
+    padding:14px;
 
     margin-bottom:12px;
 }
@@ -890,7 +1095,7 @@ h2 {
 
     gap:6px;
 
-    overflow:auto;
+    overflow-x:auto;
 
     margin-bottom:12px;
 
@@ -899,17 +1104,21 @@ h2 {
 
 button {
 
-    padding:9px 12px;
+    padding:
+    9px 12px;
 
     border-radius:8px;
 
-    border:1px solid #39485b;
+    border:
+    1px solid #39485b;
 
     background:#17212d;
 
-    color:white;
+    color:#ffffff;
 
     white-space:nowrap;
+
+    cursor:pointer;
 }
 
 button.active {
@@ -919,14 +1128,31 @@ button.active {
     border-color:#8b5cf6;
 }
 
-.value {
+.index-buttons {
 
-    margin:6px 0;
+    display:flex;
+
+    gap:7px;
+
+    overflow-x:auto;
+
+    padding-bottom:5px;
 }
 
-.wait {
+.result {
 
-    color:#ffd45a;
+    font-size:16px;
+
+    line-height:1.7;
+}
+
+.signal {
+
+    font-size:25px;
+
+    font-weight:bold;
+
+    margin-bottom:8px;
 }
 
 .call {
@@ -939,11 +1165,27 @@ button.active {
     color:#ff6673;
 }
 
+.wait {
+
+    color:#ffd45a;
+}
+
+.value {
+
+    margin:
+    3px 0;
+}
+
+.chart-card {
+
+    padding:8px;
+}
+
 #chart {
 
     width:100%;
 
-    height:500px;
+    height:520px;
 
     border-radius:10px;
 
@@ -952,12 +1194,43 @@ button.active {
     background:#0d141d;
 }
 
+.chart-info {
+
+    display:flex;
+
+    flex-wrap:wrap;
+
+    gap:12px;
+
+    padding:
+    8px 4px;
+
+    font-size:12px;
+
+    color:#cbd5e1;
+}
+
+.ema9-label {
+
+    color:#facc15;
+}
+
+.ema15-label {
+
+    color:#38bdf8;
+}
+
+.vwap-label {
+
+    color:#c084fc;
+}
+
 .stats {
 
     display:grid;
 
     grid-template-columns:
-        repeat(2,1fr);
+    repeat(2,1fr);
 
     gap:8px;
 }
@@ -988,11 +1261,46 @@ button.active {
 .trade {
 
     border-bottom:
-        1px solid #263241;
+    1px solid #263241;
 
-    padding:8px 0;
+    padding:9px 0;
 
-    font-size:13px;
+    font-size:12px;
+
+    line-height:1.6;
+}
+
+.win {
+
+    color:#54dc9a;
+}
+
+.loss {
+
+    color:#ff6673;
+}
+
+.small {
+
+    font-size:12px;
+
+    color:#9ca3af;
+}
+
+.loading {
+
+    text-align:center;
+
+    padding:20px;
+
+    color:#9ca3af;
+}
+
+.error {
+
+    color:#ff6673;
+
+    padding:10px;
 }
 
 </style>
@@ -1001,39 +1309,134 @@ button.active {
 
 <body>
 
-<h1>⚡ Personal Scalping Scanner</h1>
+<h1>
+⚡ Personal Scalping Scanner
+</h1>
 
 
 <!-- =====================================================
-     SCANNER TIMEFRAME
+     TIMEFRAME
      ===================================================== -->
+
+<div class="card">
+
+<div class="small">
+TIMEFRAME
+</div>
 
 <div class="tf">
 
-<button onclick="loadScanner('1m')">1M</button>
+<button
+id="tf-1m"
+onclick="selectTF('1m')">
+1M
+</button>
 
-<button onclick="loadScanner('2m')">2M</button>
+<button
+id="tf-2m"
+onclick="selectTF('2m')">
+2M
+</button>
 
-<button onclick="loadScanner('3m')">3M</button>
+<button
+id="tf-3m"
+onclick="selectTF('3m')">
+3M
+</button>
 
-<button onclick="loadScanner('5m')">5M</button>
+<button
+id="tf-5m"
+onclick="selectTF('5m')">
+5M
+</button>
 
-<button onclick="loadScanner('15m')">15M</button>
+<button
+id="tf-15m"
+onclick="selectTF('15m')">
+15M
+</button>
 
-<button onclick="loadScanner('1h')">1H</button>
+<button
+id="tf-1h"
+onclick="selectTF('1h')">
+1H
+</button>
 
-<button onclick="loadScanner('2h')">2H</button>
+<button
+id="tf-2h"
+onclick="selectTF('2h')">
+2H
+</button>
 
-<button onclick="loadScanner('1d')">1D</button>
+<button
+id="tf-1d"
+onclick="selectTF('1d')">
+1D
+</button>
 
-<button onclick="loadScanner('1wk')">1W</button>
+<button
+id="tf-1wk"
+onclick="selectTF('1wk')">
+1W
+</button>
+
+</div>
 
 </div>
 
 
+<!-- =====================================================
+     INDEX
+     ===================================================== -->
+
+<div class="card">
+
+<div class="small">
+INDEX
+</div>
+
+<div class="index-buttons">
+
+<button
+id="index-NIFTY 50"
+onclick="selectIndex('NIFTY 50')">
+NIFTY 50
+</button>
+
+<button
+id="index-BANK NIFTY"
+onclick="selectIndex('BANK NIFTY')">
+BANK NIFTY
+</button>
+
+<button
+id="index-SENSEX"
+onclick="selectIndex('SENSEX')">
+SENSEX
+</button>
+
+</div>
+
+</div>
+
+
+<!-- =====================================================
+     SCANNER RESULT
+     ===================================================== -->
+
+<div class="card">
+
+<div class="small">
+LIVE SIGNAL
+</div>
+
 <div id="result">
 
+<div class="loading">
 Loading...
+</div>
+
+</div>
 
 </div>
 
@@ -1042,114 +1445,144 @@ Loading...
      CHART
      ===================================================== -->
 
-<h2>📊 Index Chart</h2>
+<h2>
+📊 Index Chart
+</h2>
 
-<div class="tf">
-
-<button
-id="btnNifty"
-onclick="loadChart('^NSEI','NIFTY 50')">
-
-NIFTY 50
-
-</button>
-
-<button
-id="btnBank"
-onclick="loadChart('^NSEBANK','BANK NIFTY')">
-
-BANK NIFTY
-
-</button>
-
-<button
-id="btnSensex"
-onclick="loadChart('^BSESN','SENSEX')">
-
-SENSEX
-
-</button>
-
-</div>
-
-
-<div class="tf">
-
-<button onclick="changeChartTF('1m')">
-1M
-</button>
-
-<button onclick="changeChartTF('2m')">
-2M
-</button>
-
-<button onclick="changeChartTF('3m')">
-3M
-</button>
-
-<button onclick="changeChartTF('5m')">
-5M
-</button>
-
-<button onclick="changeChartTF('15m')">
-15M
-</button>
-
-<button onclick="changeChartTF('1h')">
-1H
-</button>
-
-<button onclick="changeChartTF('2h')">
-2H
-</button>
-
-<button onclick="changeChartTF('1d')">
-1D
-</button>
-
-<button onclick="changeChartTF('1wk')">
-1W
-</button>
-
-</div>
-
+<div class="card chart-card">
 
 <div id="chart"></div>
+
+<div class="chart-info">
+
+<span class="ema9-label">
+● EMA 9
+</span>
+
+<span class="ema15-label">
+● EMA 15
+</span>
+
+<span class="vwap-label">
+● VWAP
+</span>
+
+<span>
+▲ CALL
+</span>
+
+<span>
+▼ PUT
+</span>
+
+</div>
+
+</div>
 
 
 <!-- =====================================================
      BACKTEST
      ===================================================== -->
 
-<h2>🧪 Backtest</h2>
+<h2>
+📈 Backtest
+</h2>
 
 <div class="card">
 
-<button onclick="runBacktest()">
+<div class="stats">
 
-Run Backtest
+<div class="stat">
 
-</button>
+<div class="stat-title">
+Total Trades
+</div>
 
 <div
-id="backtestResult"
-style="margin-top:15px;">
+class="stat-value"
+id="totalTrades">
+-
+</div>
 
-Backtest नहीं चला है।
+</div>
 
+<div class="stat">
+
+<div class="stat-title">
+Wins
+</div>
+
+<div
+class="stat-value"
+id="wins">
+-
+</div>
+
+</div>
+
+<div class="stat">
+
+<div class="stat-title">
+Losses
+</div>
+
+<div
+class="stat-value"
+id="losses">
+-
+</div>
+
+</div>
+
+<div class="stat">
+
+<div class="stat-title">
+Win Rate
+</div>
+
+<div
+class="stat-value"
+id="winRate">
+-
+</div>
+
+</div>
+
+<div class="stat">
+
+<div class="stat-title">
+Net Points
+</div>
+
+<div
+class="stat-value"
+id="netPoints">
+-
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+
+<div class="card">
+
+<div class="small">
+RECENT TRADES
+</div>
+
+<div id="trades">
+
+-
+    
 </div>
 
 </div>
 
 
 <script>
-
-
-// =======================================================
-// GLOBAL VARIABLES
-// =======================================================
-
-let currentSymbol = "^NSEI";
 
 let currentIndex = "NIFTY 50";
 
@@ -1165,17 +1598,987 @@ let ema15Series = null;
 
 let vwapSeries = null;
 
-
-// =======================================================
-// SCANNER
-// =======================================================
-
-function loadScanner(tf) {
-
-    document.getElementById("result").innerHTML =
-        "Loading " + tf + "...";
+let refreshTimer = null;
 
 
-    fetch(
-        "/api/scan?tf=" +
-        encodeURICom
+/* =====================================================
+   FORMAT NUMBER
+   ===================================================== */
+
+function formatNumber(value) {
+
+    if (
+        value === null ||
+        value === undefined
+    ) {
+        return "-";
+    }
+
+    return Number(value)
+        .toLocaleString(
+            "en-IN",
+            {
+                maximumFractionDigits:2
+            }
+        );
+}
+
+
+/* =====================================================
+   SET ACTIVE BUTTON
+   ===================================================== */
+
+function updateButtons() {
+
+    document
+        .querySelectorAll(".tf button")
+        .forEach(
+            b => b.classList.remove("active")
+        );
+
+    const tfButton =
+        document.getElementById(
+            "tf-" + currentTF
+        );
+
+    if (tfButton) {
+        tfButton.classList.add("active");
+    }
+
+
+    document
+        .querySelectorAll(".index-buttons button")
+        .forEach(
+            b => b.classList.remove("active")
+        );
+
+    const indexButton =
+        document.getElementById(
+            "index-" + currentIndex
+        );
+
+    if (indexButton) {
+        indexButton.classList.add("active");
+    }
+
+}
+
+
+/* =====================================================
+   SELECT TIMEFRAME
+   ===================================================== */
+
+function selectTF(tf) {
+
+    currentTF = tf;
+
+    updateButtons();
+
+    loadAll();
+
+}
+
+
+/* =====================================================
+   SELECT INDEX
+   ===================================================== */
+
+function selectIndex(index) {
+
+    currentIndex = index;
+
+    updateButtons();
+
+    loadAll();
+
+}
+
+
+/* =====================================================
+   CREATE CHART
+   ===================================================== */
+
+function createChart() {
+
+    const container =
+        document.getElementById(
+            "chart"
+        );
+
+    if (chart) {
+
+        chart.remove();
+
+        chart = null;
+    }
+
+    chart =
+        LightweightCharts.createChart(
+            container,
+            {
+
+                width:
+                    container.clientWidth,
+
+                height:520,
+
+                layout: {
+
+                    background: {
+                        color:"#0d141d"
+                    },
+
+                    textColor:"#cbd5e1"
+
+                },
+
+                grid: {
+
+                    vertLines: {
+                        color:"#1b2633"
+                    },
+
+                    horzLines: {
+                        color:"#1b2633"
+                    }
+
+                },
+
+                rightPriceScale: {
+
+                    borderColor:
+                        "#263241"
+
+                },
+
+                timeScale: {
+
+                    borderColor:
+                        "#263241",
+
+                    timeVisible:true,
+
+                    secondsVisible:false
+
+                }
+
+            }
+        );
+
+
+    candleSeries =
+        chart.addCandlestickSeries({
+
+            upColor:"#22c55e",
+
+            downColor:"#ef4444",
+
+            borderUpColor:"#22c55e",
+
+            borderDownColor:"#ef4444",
+
+            wickUpColor:"#22c55e",
+
+            wickDownColor:"#ef4444"
+
+        });
+
+
+    ema9Series =
+        chart.addLineSeries({
+
+            lineWidth:2,
+
+            color:"#facc15"
+
+        });
+
+
+    ema15Series =
+        chart.addLineSeries({
+
+            lineWidth:2,
+
+            color:"#38bdf8"
+
+        });
+
+
+    vwapSeries =
+        chart.addLineSeries({
+
+            lineWidth:2,
+
+            color:"#c084fc"
+
+        });
+
+
+    window.addEventListener(
+        "resize",
+        resizeChart
+    );
+
+}
+
+
+/* =====================================================
+   RESIZE CHART
+   ===================================================== */
+
+function resizeChart() {
+
+    const container =
+        document.getElementById(
+            "chart"
+        );
+
+    if (
+        chart &&
+        container
+    ) {
+
+        chart.applyOptions({
+
+            width:
+                container.clientWidth
+
+        });
+
+    }
+
+}
+
+
+/* =====================================================
+   LOAD CHART
+   ===================================================== */
+
+async function loadChart() {
+
+    try {
+
+        const url =
+            "/api/chart?index="
+            + encodeURIComponent(
+                currentIndex
+            )
+            + "&tf="
+            + encodeURIComponent(
+                currentTF
+            );
+
+        const response =
+            await fetch(url);
+
+        const data =
+            await response.json();
+
+        if (
+            !Array.isArray(data)
+            || data.length === 0
+        ) {
+
+            return;
+
+        }
+
+        if (!chart) {
+
+            createChart();
+
+        }
+
+
+        const candles = [];
+
+        const ema9 = [];
+
+        const ema15 = [];
+
+        const vwap = [];
+
+        const markers = [];
+
+
+        data.forEach(
+            row => {
+
+                candles.push({
+
+                    time:row.time,
+
+                    open:row.open,
+
+                    high:row.high,
+
+                    low:row.low,
+
+                    close:row.close
+
+                });
+
+
+                ema9.push({
+
+                    time:row.time,
+
+                    value:row.ema9
+
+                });
+
+
+                ema15.push({
+
+                    time:row.time,
+
+                    value:row.ema15
+
+                });
+
+
+                vwap.push({
+
+                    time:row.time,
+
+                    value:row.vwap
+
+                });
+
+
+                if (
+                    row.marker === "CALL"
+                ) {
+
+                    markers.push({
+
+                        time:row.time,
+
+                        position:"belowBar",
+
+                        color:"#22c55e",
+
+                        shape:"arrowUp",
+
+                        text:"CALL"
+
+                    });
+
+                }
+
+
+                if (
+                    row.marker === "PUT"
+                ) {
+
+                    markers.push({
+
+                        time:row.time,
+
+                        position:"aboveBar",
+
+                        color:"#ef4444",
+
+                        shape:"arrowDown",
+
+                        text:"PUT"
+
+                    });
+
+                }
+
+            }
+        );
+
+
+        candleSeries.setData(
+            candles
+        );
+
+        ema9Series.setData(
+            ema9
+        );
+
+        ema15Series.setData(
+            ema15
+        );
+
+        vwapSeries.setData(
+            vwap
+        );
+
+
+        if (
+            candleSeries.setMarkers
+        ) {
+
+            candleSeries.setMarkers(
+                markers
+            );
+
+        }
+
+
+        chart.timeScale()
+            .fitContent();
+
+    }
+
+    catch(error) {
+
+        console.log(
+            "Chart error:",
+            error
+        );
+
+    }
+
+}
+
+
+/* =====================================================
+   LOAD SCANNER
+   ===================================================== */
+
+async function loadScanner() {
+
+    const result =
+        document.getElementById(
+            "result"
+        );
+
+    try {
+
+        const url =
+            "/api/scanner?index="
+            + encodeURIComponent(
+                currentIndex
+            )
+            + "&tf="
+            + encodeURIComponent(
+                currentTF
+            );
+
+        const response =
+            await fetch(url);
+
+        const data =
+            await response.json();
+
+
+        if (data.error) {
+
+            result.innerHTML =
+                "<div class='error'>"
+                + data.error
+                + "</div>";
+
+            return;
+
+        }
+
+
+        let signalClass =
+            "wait";
+
+        let signalText =
+            data.signal;
+
+
+        if (
+            data.signal === "CALL"
+        ) {
+
+            signalClass = "call";
+
+            signalText =
+                "🟢 CALL";
+
+        }
+
+        else if (
+            data.signal === "PUT"
+        ) {
+
+            signalClass = "put";
+
+            signalText =
+                "🔴 PUT";
+
+        }
+
+        else {
+
+            signalText =
+                "🟡 WAIT";
+
+        }
+
+
+        result.innerHTML = `
+
+            <div class="signal ${signalClass}">
+                ${signalText}
+            </div>
+
+            <div class="value">
+                <b>Index:</b>
+                ${currentIndex}
+            </div>
+
+            <div class="value">
+                <b>Timeframe:</b>
+                ${currentTF}
+            </div>
+
+            <div class="value">
+                <b>Price:</b>
+                ${formatNumber(data.price)}
+            </div>
+
+            <div class="value">
+                <b>EMA 9:</b>
+                ${formatNumber(data.ema9)}
+            </div>
+
+            <div class="value">
+                <b>EMA 15:</b>
+                ${formatNumber(data.ema15)}
+            </div>
+
+            <div class="value">
+                <b>VWAP:</b>
+                ${formatNumber(data.vwap)}
+            </div>
+
+            <div class="small">
+                ${data.time || ""}
+            </div>
+        `;
+
+    }
+
+    catch(error) {
+
+        result.innerHTML =
+            "<div class='error'>"
+            + "Scanner error"
+            + "</div>";
+
+        console.log(error);
+
+    }
+
+}
+
+
+/* =====================================================
+   LOAD BACKTEST
+   ===================================================== */
+
+async function loadBacktest() {
+
+    try {
+
+        const url =
+            "/api/backtest?index="
+            + encodeURIComponent(
+                currentIndex
+            )
+            + "&tf="
+            + encodeURIComponent(
+                currentTF
+            );
+
+        const response =
+            await fetch(url);
+
+        const data =
+            await response.json();
+
+
+        document.getElementById(
+            "totalTrades"
+        ).textContent =
+            data.total_trades ?? "-";
+
+
+        document.getElementById(
+            "wins"
+        ).textContent =
+            data.wins ?? "-";
+
+
+        document.getElementById(
+            "losses"
+        ).textContent =
+            data.losses ?? "-";
+
+
+        document.getElementById(
+            "winRate"
+        ).textContent =
+            data.win_rate !== undefined
+            ? data.win_rate + "%"
+            : "-";
+
+
+        document.getElementById(
+            "netPoints"
+        ).textContent =
+            data.net_points ?? "-";
+
+
+        const trades =
+            document.getElementById(
+                "trades"
+            );
+
+
+        if (
+            !data.trades ||
+            data.trades.length === 0
+        ) {
+
+            trades.innerHTML =
+                "<div class='small'>"
+                + "No trades"
+                + "</div>";
+
+            return;
+
+        }
+
+
+        const recent =
+            data.trades
+                .slice(-20)
+                .reverse();
+
+
+        trades.innerHTML =
+            recent.map(
+                t => {
+
+                    const cls =
+                        t.result === "WIN"
+                        ? "win"
+                        : "loss";
+
+                    return `
+
+                    <div class="trade">
+
+                        <b>${t.type}</b>
+
+                        &nbsp; |
+
+                        Entry:
+                        ${t.entry}
+
+                        &nbsp; |
+
+                        Exit:
+                        ${t.exit}
+
+                        &nbsp; |
+
+                        Points:
+                        <span class="${cls}">
+                            ${t.points}
+                        </span>
+
+                        &nbsp; |
+
+                        <span class="${cls}">
+                            ${t.result}
+                        </span>
+
+                        <br>
+
+                        <span class="small">
+                            ${t.entry_time}
+                            →
+                            ${t.exit_time}
+                        </span>
+
+                    </div>
+
+                    `;
+
+                }
+            )
+            .join("");
+
+    }
+
+    catch(error) {
+
+        console.log(
+            "Backtest error:",
+            error
+        );
+
+    }
+
+}
+
+
+/* =====================================================
+   LOAD EVERYTHING
+   ===================================================== */
+
+async function loadAll() {
+
+    await loadScanner();
+
+    await loadChart();
+
+    await loadBacktest();
+
+}
+
+
+/* =====================================================
+   AUTO REFRESH
+   ===================================================== */
+
+function startAutoRefresh() {
+
+    if (refreshTimer) {
+
+        clearInterval(
+            refreshTimer
+        );
+
+    }
+
+    refreshTimer =
+        setInterval(
+            loadAll,
+            30000
+        );
+
+}
+
+
+/* =====================================================
+   INITIAL LOAD
+   ===================================================== */
+
+document.addEventListener(
+    "DOMContentLoaded",
+    function() {
+
+        updateButtons();
+
+        createChart();
+
+        loadAll();
+
+        startAutoRefresh();
+
+    }
+);
+
+</script>
+
+</body>
+
+</html>
+"""
+
+    return html
+
+
+# =========================================================
+# API - SCANNER
+# =========================================================
+
+@app.route(
+    "/api/scanner"
+)
+def api_scanner():
+
+    index_name = request.args.get(
+        "index",
+        "NIFTY 50"
+    )
+
+    tf = request.args.get(
+        "tf",
+        "5m"
+    )
+
+    if index_name not in INDICES:
+
+        return jsonify({
+            "error":
+                "Invalid index"
+        }), 400
+
+    if tf not in TIMEFRAMES:
+
+        return jsonify({
+            "error":
+                "Invalid timeframe"
+        }), 400
+
+    symbol = INDICES[
+        index_name
+    ]
+
+    data = download_data(
+        symbol,
+        tf
+    )
+
+    result = calculate_scanner(
+        data
+    )
+
+    return jsonify(result)
+
+
+# =========================================================
+# API - CHART
+# =========================================================
+
+@app.route(
+    "/api/chart"
+)
+def api_chart():
+
+    index_name = request.args.get(
+        "index",
+        "NIFTY 50"
+    )
+
+    tf = request.args.get(
+        "tf",
+        "5m"
+    )
+
+    if index_name not in INDICES:
+
+        return jsonify({
+            "error":
+                "Invalid index"
+        }), 400
+
+    if tf not in TIMEFRAMES:
+
+        return jsonify({
+            "error":
+                "Invalid timeframe"
+        }), 400
+
+    symbol = INDICES[
+        index_name
+    ]
+
+    data = download_data(
+        symbol,
+        tf
+    )
+
+    result = chart_json(
+        data
+    )
+
+    return jsonify(result)
+
+
+# =========================================================
+# API - BACKTEST
+# =========================================================
+
+@app.route(
+    "/api/backtest"
+)
+def api_backtest():
+
+    index_name = request.args.get(
+        "index",
+        "NIFTY 50"
+    )
+
+    tf = request.args.get(
+        "tf",
+        "5m"
+    )
+
+    if index_name not in INDICES:
+
+        return jsonify({
+            "error":
+                "Invalid index"
+        }), 400
+
+    if tf not in TIMEFRAMES:
+
+        return jsonify({
+            "error":
+                "Invalid timeframe"
+        }), 400
+
+    symbol = INDICES[
+        index_name
+    ]
+
+    data = download_data(
+        symbol,
+        tf
+    )
+
+    result = run_backtest(
+        data
+    )
+
+    return jsonify(result)
+
+
+# =========================================================
+# API - HEALTH
+# =========================================================
+
+@app.route(
+    "/api/health"
+)
+def api_health():
+
+    return jsonify({
+
+        "status":
+            "ok",
+
+        "scanner":
+            "running",
+
+        "chart":
+            "running",
+
+        "backtest":
+            "running"
+
+    })
+
+
+# =========================================================
+# RUN
+# =========================================================
+
+if __name__ == "__main__":
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False
+    )
