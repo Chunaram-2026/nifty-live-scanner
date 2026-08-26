@@ -248,13 +248,18 @@ def calculate_indicators(data):
 # SIGNAL
 # =========================================================
 
-def get_signal(row):
+# ============================================================
+# SIGNAL WITH EMA 9/15 + VWAP + LIQUIDITY SWEEP
+# ============================================================
+
+def get_signal(row, previous=None):
 
     price = row["Close"]
     ema9 = row["EMA9"]
     ema15 = row["EMA15"]
     vwap = row["VWAP"]
 
+    # Basic data check
     if pd.isna(price):
         return "NO DATA"
 
@@ -264,28 +269,64 @@ def get_signal(row):
     if pd.isna(vwap):
         return "WAIT"
 
-    # CALL BIAS
+    # First candle - no previous candle available
+    if previous is None:
+        return "WAIT"
+
+    prev_high = previous["High"]
+    prev_low = previous["Low"]
+
+    if pd.isna(prev_high) or pd.isna(prev_low):
+        return "WAIT"
+
+    # ========================================================
+    # BUY / CALL
+    # ========================================================
+    # 1. Price above VWAP
+    # 2. EMA 9 above EMA 15
+    # 3. Current candle sweeps previous LOW
+    # 4. Current candle closes back ABOVE previous LOW
+    # ========================================================
+
+    buy_sweep = (
+        row["Low"] < prev_low
+        and price > prev_low
+    )
+
     if (
         price > vwap
         and ema9 > ema15
+        and buy_sweep
     ):
         return "CALL"
 
-    # PUT BIAS
+    # ========================================================
+    # SELL / PUT
+    # ========================================================
+    # 1. Price below VWAP
+    # 2. EMA 9 below EMA 15
+    # 3. Current candle sweeps previous HIGH
+    # 4. Current candle closes back BELOW previous HIGH
+    # ========================================================
+
+    sell_sweep = (
+        row["High"] > prev_high
+        and price < prev_high
+    )
+
     if (
         price < vwap
         and ema9 < ema15
+        and sell_sweep
     ):
         return "PUT"
 
     return "WAIT"
 
 
-# =========================================================
+# ============================================================
 # SIGNAL MARKERS
-#
-# केवल signal बदलने पर marker लगाया जाएगा
-# =========================================================
+# ============================================================
 
 def add_signal_markers(data):
 
@@ -293,32 +334,47 @@ def add_signal_markers(data):
 
     signals = []
 
-    previous = "WAIT"
+    previous_signal = "WAIT"
+    previous_row = None
 
     for _, row in data.iterrows():
 
-        current = get_signal(row)
+        current = get_signal(
+            row,
+            previous_row
+        )
 
         marker = ""
 
-        if current == "CALL" and previous != "CALL":
+        # CALL marker only when new CALL appears
+        if (
+            current == "CALL"
+            and previous_signal != "CALL"
+        ):
             marker = "CALL"
 
-        elif current == "PUT" and previous != "PUT":
+        # PUT marker only when new PUT appears
+        elif (
+            current == "PUT"
+            and previous_signal != "PUT"
+        ):
             marker = "PUT"
 
         signals.append(marker)
 
+        # Update previous signal
         if current in ["CALL", "PUT"]:
-            previous = current
+            previous_signal = current
 
         elif current == "WAIT":
-            previous = "WAIT"
+            previous_signal = "WAIT"
+
+        # Update previous candle
+        previous_row = row
 
     data["MARKER"] = signals
 
     return data
-
 
 # =========================================================
 # SCANNER
