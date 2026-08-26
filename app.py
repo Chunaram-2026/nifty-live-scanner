@@ -78,6 +78,7 @@ def clean_columns(data):
         return None
 
     if isinstance(data.columns, pd.MultiIndex):
+
         data.columns = data.columns.get_level_values(0)
 
     required = [
@@ -88,10 +89,12 @@ def clean_columns(data):
     ]
 
     for col in required:
+
         if col not in data.columns:
             return None
 
     if "Volume" not in data.columns:
+
         data["Volume"] = 0
 
     data = data.dropna(
@@ -227,31 +230,37 @@ def calculate_indicators(data):
     # Reset every trading day
     # =====================================================
 
-    data["_date"] = data.index.date
+    try:
 
-    cumulative_pv = (
-        typical_price * volume
-    ).groupby(
-        data["_date"]
-    ).cumsum()
+        data["_date"] = data.index.date
 
-    cumulative_volume = (
-        volume
-        .groupby(data["_date"])
-        .cumsum()
-    )
+        cumulative_pv = (
+            typical_price * volume
+        ).groupby(
+            data["_date"]
+        ).cumsum()
 
-    data["VWAP"] = np.where(
-        cumulative_volume > 0,
-        cumulative_pv /
-        cumulative_volume,
-        typical_price
-    )
+        cumulative_volume = (
+            volume
+            .groupby(data["_date"])
+            .cumsum()
+        )
 
-    data.drop(
-        columns=["_date"],
-        inplace=True
-    )
+        data["VWAP"] = np.where(
+            cumulative_volume > 0,
+            cumulative_pv /
+            cumulative_volume,
+            typical_price
+        )
+
+        data.drop(
+            columns=["_date"],
+            inplace=True
+        )
+
+    except Exception:
+
+        data["VWAP"] = typical_price
 
     return data
 
@@ -272,10 +281,7 @@ def calculate_indicators(data):
 # Current CLOSE returns below previous HIGH
 # =========================================================
 
-def get_signal(
-    row,
-    previous=None
-):
+def get_signal(row, previous=None):
 
     try:
 
@@ -295,20 +301,30 @@ def get_signal(
             row["VWAP"]
         )
 
+        current_high = float(
+            row["High"]
+        )
+
+        current_low = float(
+            row["Low"]
+        )
+
     except Exception:
 
         return "WAIT"
 
-    if pd.isna(price):
-        return "NO DATA"
-
-    if (
-        pd.isna(ema9)
-        or pd.isna(ema15)
+    if any(
+        pd.isna(x)
+        for x in [
+            price,
+            ema9,
+            ema15,
+            vwap,
+            current_high,
+            current_low
+        ]
     ):
-        return "WAIT"
 
-    if pd.isna(vwap):
         return "WAIT"
 
     if previous is None:
@@ -332,14 +348,15 @@ def get_signal(
         pd.isna(prev_high)
         or pd.isna(prev_low)
     ):
+
         return "WAIT"
 
     # =====================================================
-    # BUY / CALL LIQUIDITY SWEEP
+    # CALL LIQUIDITY SWEEP
     # =====================================================
 
     buy_sweep = (
-        float(row["Low"]) < prev_low
+        current_low < prev_low
         and price > prev_low
     )
 
@@ -348,14 +365,15 @@ def get_signal(
         and ema9 > ema15
         and buy_sweep
     ):
+
         return "CALL"
 
     # =====================================================
-    # SELL / PUT LIQUIDITY SWEEP
+    # PUT LIQUIDITY SWEEP
     # =====================================================
 
     sell_sweep = (
-        float(row["High"]) > prev_high
+        current_high > prev_high
         and price < prev_high
     )
 
@@ -364,6 +382,7 @@ def get_signal(
         and ema9 < ema15
         and sell_sweep
     ):
+
         return "PUT"
 
     return "WAIT"
@@ -382,6 +401,8 @@ def add_signal_markers(data):
 
     signals = []
 
+    markers = []
+
     previous_signal = "WAIT"
 
     previous_row = None
@@ -393,25 +414,26 @@ def add_signal_markers(data):
             previous_row
         )
 
+        signals.append(current)
+
         marker = ""
 
-        # New CALL only
         if (
             current == "CALL"
             and previous_signal != "CALL"
         ):
+
             marker = "CALL"
 
-        # New PUT only
         elif (
             current == "PUT"
             and previous_signal != "PUT"
         ):
+
             marker = "PUT"
 
-        signals.append(marker)
+        markers.append(marker)
 
-        # Update signal state
         if current in [
             "CALL",
             "PUT"
@@ -425,16 +447,18 @@ def add_signal_markers(data):
 
         previous_row = row
 
-    data["MARKER"] = signals
+    data["Signal"] = signals
+
+    data["MARKER"] = markers
 
     return data
 
 
 # =========================================================
-# CALCULATE ALL SIGNALS
+# ALL INDICATORS + SIGNALS
 # =========================================================
 
-def calculate_all_signals(data):
+def prepare_data(data):
 
     if data is None or data.empty:
         return None
@@ -446,9 +470,11 @@ def calculate_all_signals(data):
     if data is None or data.empty:
         return None
 
-    return add_signal_markers(
+    data = add_signal_markers(
         data
     )
+
+    return data
 
 
 # =========================================================
@@ -467,24 +493,21 @@ def calculate_scanner(data):
             "price": None,
             "ema9": None,
             "ema15": None,
-            "vwap": None
+            "vwap": None,
+            "time": None
         }
 
-    data = calculate_all_signals(
-        data
-    )
+    data = prepare_data(data)
 
-    if (
-        data is None
-        or data.empty
-    ):
+    if data is None or data.empty:
 
         return {
             "signal": "NO DATA",
             "price": None,
             "ema9": None,
             "ema15": None,
-            "vwap": None
+            "vwap": None,
+            "time": None
         }
 
     row = data.iloc[-1]
@@ -501,12 +524,15 @@ def calculate_scanner(data):
     )
 
     if signal == "CALL":
+
         bias = "CALL"
 
     elif signal == "PUT":
+
         bias = "PUT"
 
     else:
+
         bias = "WAIT"
 
     return {
@@ -545,17 +571,14 @@ def calculate_scanner(data):
 
 def chart_json(data):
 
-    if (
-        data is None
-        or data.empty
-    ):
+    if data is None or data.empty:
+
         return []
 
-    data = calculate_all_signals(
-        data
-    )
+    data = prepare_data(data)
 
-    if data is None:
+    if data is None or data.empty:
+
         return []
 
     result = []
@@ -573,22 +596,6 @@ def chart_json(data):
                 pd.Timestamp(
                     timestamp
                 ).timestamp()
-            )
-
-            previous = (
-                data.iloc[i - 1]
-                if i > 0
-                else None
-            )
-
-            signal = get_signal(
-                row,
-                previous
-            )
-
-            marker = row.get(
-                "MARKER",
-                ""
             )
 
             result.append({
@@ -630,9 +637,20 @@ def chart_json(data):
                     2
                 ),
 
-                "signal": signal,
+                "signal": str(
+                    row.get(
+                        "Signal",
+                        "WAIT"
+                    )
+                ),
 
-                "marker": marker
+                "marker": str(
+                    row.get(
+                        "MARKER",
+                        ""
+                    )
+                )
+
             })
 
         except Exception as e:
@@ -653,14 +671,13 @@ def chart_json(data):
 # Signal candle पर signal बनता है.
 # Entry अगली candle के OPEN पर.
 # Exit opposite signal की अगली candle OPEN पर.
+#
+# अभी SL / TARGET शामिल नहीं हैं.
 # =========================================================
 
 def run_backtest(data):
 
-    if (
-        data is None
-        or data.empty
-    ):
+    if data is None or data.empty:
 
         return {
             "trades": [],
@@ -671,9 +688,7 @@ def run_backtest(data):
             "net_points": 0
         }
 
-    data = calculate_all_signals(
-        data
-    )
+    data = prepare_data(data)
 
     if (
         data is None
@@ -689,27 +704,6 @@ def run_backtest(data):
             "net_points": 0
         }
 
-    signals = []
-
-    previous = None
-
-    for _, row in data.iterrows():
-
-        signal = get_signal(
-            row,
-            previous
-        )
-
-        signals.append(
-            signal
-        )
-
-        previous = row
-
-    data = data.copy()
-
-    data["Signal"] = signals
-
     trades = []
 
     position = None
@@ -721,7 +715,7 @@ def run_backtest(data):
     position_type = None
 
     # =====================================================
-    # SIGNAL CANDLE -> NEXT CANDLE OPEN ENTRY
+    # SIGNAL CANDLE
     # =====================================================
 
     for i in range(
@@ -740,7 +734,7 @@ def run_backtest(data):
         next_time = data.index[i + 1]
 
         # =================================================
-        # NO POSITION
+        # ENTRY
         # =================================================
 
         if position is None:
@@ -818,7 +812,6 @@ def run_backtest(data):
                     )
                 })
 
-                # Reverse position
                 position = "PUT"
 
                 position_type = "PUT"
@@ -876,7 +869,6 @@ def run_backtest(data):
                     )
                 })
 
-                # Reverse position
                 position = "CALL"
 
                 position_type = "CALL"
@@ -886,7 +878,7 @@ def run_backtest(data):
                 entry_time = next_time
 
     # =====================================================
-    # CLOSE LAST OPEN POSITION
+    # CLOSE LAST POSITION
     # =====================================================
 
     if (
@@ -948,29 +940,23 @@ def run_backtest(data):
             )
         })
 
-    # =====================================================
-    # STATISTICS
-    # =====================================================
-
-    total_trades = len(
-        trades
-    )
+    total_trades = len(trades)
 
     wins = sum(
         1
-        for x in trades
-        if x["result"] == "WIN"
+        for trade in trades
+        if trade["result"] == "WIN"
     )
 
     losses = sum(
         1
-        for x in trades
-        if x["result"] == "LOSS"
+        for trade in trades
+        if trade["result"] == "LOSS"
     )
 
     net_points = sum(
-        x["points"]
-        for x in trades
+        trade["points"]
+        for trade in trades
     )
 
     if total_trades > 0:
@@ -1034,8 +1020,13 @@ content="width=device-width,initial-scale=1">
 Personal Scalping Scanner
 </title>
 
+<!--
+IMPORTANT:
+Use a fixed compatible Lightweight Charts version.
+-->
+
 <script src=
-"https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js">
+"https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js">
 </script>
 
 <style>
@@ -1051,8 +1042,8 @@ body {
     color:#ffffff;
 
     font-family:
-    Arial,
-    sans-serif;
+        Arial,
+        sans-serif;
 
     margin:0;
 
@@ -1064,7 +1055,7 @@ h1 {
     font-size:22px;
 
     margin:
-    8px 0 15px;
+        8px 0 15px;
 }
 
 h2 {
@@ -1072,7 +1063,7 @@ h2 {
     font-size:18px;
 
     margin:
-    20px 0 10px;
+        20px 0 10px;
 }
 
 .card {
@@ -1080,7 +1071,7 @@ h2 {
     background:#111923;
 
     border:
-    1px solid #263241;
+        1px solid #263241;
 
     border-radius:12px;
 
@@ -1105,12 +1096,12 @@ h2 {
 button {
 
     padding:
-    9px 12px;
+        9px 12px;
 
     border-radius:8px;
 
     border:
-    1px solid #39485b;
+        1px solid #39485b;
 
     background:#17212d;
 
@@ -1128,31 +1119,15 @@ button.active {
     border-color:#8b5cf6;
 }
 
-.index-buttons {
+.value {
 
-    display:flex;
-
-    gap:7px;
-
-    overflow-x:auto;
-
-    padding-bottom:5px;
+    margin:
+        6px 0;
 }
 
-.result {
+.wait {
 
-    font-size:16px;
-
-    line-height:1.7;
-}
-
-.signal {
-
-    font-size:25px;
-
-    font-weight:bold;
-
-    margin-bottom:8px;
+    color:#ffd45a;
 }
 
 .call {
@@ -1165,64 +1140,38 @@ button.active {
     color:#ff6673;
 }
 
-.wait {
+.error {
 
-    color:#ffd45a;
+    color:#ff6673;
+
+    padding:10px;
+
+    background:#241015;
+
+    border-radius:8px;
 }
 
-.value {
+.chart-wrapper {
 
-    margin:
-    3px 0;
-}
+    width:100%;
 
-.chart-card {
+    height:520px;
 
-    padding:8px;
+    background:#0d141d;
+
+    border:
+        1px solid #263241;
+
+    border-radius:10px;
+
+    overflow:hidden;
 }
 
 #chart {
 
     width:100%;
 
-    height:520px;
-
-    border-radius:10px;
-
-    overflow:hidden;
-
-    background:#0d141d;
-}
-
-.chart-info {
-
-    display:flex;
-
-    flex-wrap:wrap;
-
-    gap:12px;
-
-    padding:
-    8px 4px;
-
-    font-size:12px;
-
-    color:#cbd5e1;
-}
-
-.ema9-label {
-
-    color:#facc15;
-}
-
-.ema15-label {
-
-    color:#38bdf8;
-}
-
-.vwap-label {
-
-    color:#c084fc;
+    height:100%;
 }
 
 .stats {
@@ -1230,7 +1179,7 @@ button.active {
     display:grid;
 
     grid-template-columns:
-    repeat(2,1fr);
+        repeat(2,1fr);
 
     gap:8px;
 }
@@ -1261,23 +1210,26 @@ button.active {
 .trade {
 
     border-bottom:
-    1px solid #263241;
+        1px solid #263241;
 
-    padding:9px 0;
+    padding:8px 0;
 
-    font-size:12px;
-
-    line-height:1.6;
+    font-size:13px;
 }
 
-.win {
+.green {
 
     color:#54dc9a;
 }
 
-.loss {
+.red {
 
     color:#ff6673;
+}
+
+.yellow {
+
+    color:#ffd45a;
 }
 
 .small {
@@ -1285,22 +1237,6 @@ button.active {
     font-size:12px;
 
     color:#9ca3af;
-}
-
-.loading {
-
-    text-align:center;
-
-    padding:20px;
-
-    color:#9ca3af;
-}
-
-.error {
-
-    color:#ff6673;
-
-    padding:10px;
 }
 
 </style>
@@ -1315,107 +1251,91 @@ button.active {
 
 
 <!-- =====================================================
-     TIMEFRAME
+     TIMEFRAME BUTTONS
      ===================================================== -->
-
-<div class="card">
-
-<div class="small">
-TIMEFRAME
-</div>
 
 <div class="tf">
 
 <button
-id="tf-1m"
-onclick="selectTF('1m')">
+data-tf="1m"
+onclick="selectTimeframe('1m')">
 1M
 </button>
 
 <button
-id="tf-2m"
-onclick="selectTF('2m')">
+data-tf="2m"
+onclick="selectTimeframe('2m')">
 2M
 </button>
 
 <button
-id="tf-3m"
-onclick="selectTF('3m')">
+data-tf="3m"
+onclick="selectTimeframe('3m')">
 3M
 </button>
 
 <button
-id="tf-5m"
-onclick="selectTF('5m')">
+data-tf="5m"
+onclick="selectTimeframe('5m')">
 5M
 </button>
 
 <button
-id="tf-15m"
-onclick="selectTF('15m')">
+data-tf="15m"
+onclick="selectTimeframe('15m')">
 15M
 </button>
 
 <button
-id="tf-1h"
-onclick="selectTF('1h')">
+data-tf="1h"
+onclick="selectTimeframe('1h')">
 1H
 </button>
 
 <button
-id="tf-2h"
-onclick="selectTF('2h')">
+data-tf="2h"
+onclick="selectTimeframe('2h')">
 2H
 </button>
 
 <button
-id="tf-1d"
-onclick="selectTF('1d')">
+data-tf="1d"
+onclick="selectTimeframe('1d')">
 1D
 </button>
 
 <button
-id="tf-1wk"
-onclick="selectTF('1wk')">
+data-tf="1wk"
+onclick="selectTimeframe('1wk')">
 1W
 </button>
 
 </div>
 
-</div>
-
 
 <!-- =====================================================
-     INDEX
+     INDEX BUTTONS
      ===================================================== -->
 
-<div class="card">
-
-<div class="small">
-INDEX
-</div>
-
-<div class="index-buttons">
+<div class="tf">
 
 <button
-id="index-NIFTY 50"
+data-index="NIFTY 50"
 onclick="selectIndex('NIFTY 50')">
 NIFTY 50
 </button>
 
 <button
-id="index-BANK NIFTY"
+data-index="BANK NIFTY"
 onclick="selectIndex('BANK NIFTY')">
 BANK NIFTY
 </button>
 
 <button
-id="index-SENSEX"
+data-index="SENSEX"
 onclick="selectIndex('SENSEX')">
 SENSEX
 </button>
-
-</div>
 
 </div>
 
@@ -1424,19 +1344,9 @@ SENSEX
      SCANNER RESULT
      ===================================================== -->
 
-<div class="card">
-
-<div class="small">
-LIVE SIGNAL
-</div>
-
 <div id="result">
 
-<div class="loading">
 Loading...
-</div>
-
-</div>
 
 </div>
 
@@ -1449,33 +1359,9 @@ Loading...
 📊 Index Chart
 </h2>
 
-<div class="card chart-card">
+<div class="chart-wrapper">
 
 <div id="chart"></div>
-
-<div class="chart-info">
-
-<span class="ema9-label">
-● EMA 9
-</span>
-
-<span class="ema15-label">
-● EMA 15
-</span>
-
-<span class="vwap-label">
-● VWAP
-</span>
-
-<span>
-▲ CALL
-</span>
-
-<span>
-▼ PUT
-</span>
-
-</div>
 
 </div>
 
@@ -1488,105 +1374,22 @@ Loading...
 📈 Backtest
 </h2>
 
-<div class="card">
-
-<div class="stats">
-
-<div class="stat">
-
-<div class="stat-title">
-Total Trades
-</div>
-
 <div
-class="stat-value"
-id="totalTrades">
--
-</div>
-
-</div>
-
-<div class="stat">
-
-<div class="stat-title">
-Wins
-</div>
-
-<div
-class="stat-value"
-id="wins">
--
-</div>
-
-</div>
-
-<div class="stat">
-
-<div class="stat-title">
-Losses
-</div>
-
-<div
-class="stat-value"
-id="losses">
--
-</div>
-
-</div>
-
-<div class="stat">
-
-<div class="stat-title">
-Win Rate
-</div>
-
-<div
-class="stat-value"
-id="winRate">
--
-</div>
-
-</div>
-
-<div class="stat">
-
-<div class="stat-title">
-Net Points
-</div>
-
-<div
-class="stat-value"
-id="netPoints">
--
-</div>
-
-</div>
-
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="small">
-RECENT TRADES
-</div>
-
-<div id="trades">
-
--
-    
-</div>
-
+class="card"
+id="backtest">
+Loading...
 </div>
 
 
 <script>
 
+/* ========================================================
+   GLOBAL VARIABLES
+======================================================== */
+
 let currentIndex = "NIFTY 50";
 
-let currentTF = "5m";
+let currentTf = "5m";
 
 let chart = null;
 
@@ -1598,105 +1401,243 @@ let ema15Series = null;
 
 let vwapSeries = null;
 
-let refreshTimer = null;
+
+/* ========================================================
+   INDEX SYMBOLS
+======================================================== */
+
+const INDEX_SYMBOLS = {
+
+    "NIFTY 50":
+        "^NSEI",
+
+    "BANK NIFTY":
+        "^NSEBANK",
+
+    "SENSEX":
+        "^BSESN"
+
+};
 
 
-/* =====================================================
-   FORMAT NUMBER
-   ===================================================== */
-
-function formatNumber(value) {
-
-    if (
-        value === null ||
-        value === undefined
-    ) {
-        return "-";
-    }
-
-    return Number(value)
-        .toLocaleString(
-            "en-IN",
-            {
-                maximumFractionDigits:2
-            }
-        );
-}
-
-
-/* =====================================================
-   SET ACTIVE BUTTON
-   ===================================================== */
-
-function updateButtons() {
-
-    document
-        .querySelectorAll(".tf button")
-        .forEach(
-            b => b.classList.remove("active")
-        );
-
-    const tfButton =
-        document.getElementById(
-            "tf-" + currentTF
-        );
-
-    if (tfButton) {
-        tfButton.classList.add("active");
-    }
-
-
-    document
-        .querySelectorAll(".index-buttons button")
-        .forEach(
-            b => b.classList.remove("active")
-        );
-
-    const indexButton =
-        document.getElementById(
-            "index-" + currentIndex
-        );
-
-    if (indexButton) {
-        indexButton.classList.add("active");
-    }
-
-}
-
-
-/* =====================================================
+/* ========================================================
    SELECT TIMEFRAME
-   ===================================================== */
+======================================================== */
 
-function selectTF(tf) {
+function selectTimeframe(tf) {
 
-    currentTF = tf;
+    currentTf = tf;
 
-    updateButtons();
+    document
+        .querySelectorAll(
+            "[data-tf]"
+        )
+        .forEach(button => {
 
-    loadAll();
+            button.classList.remove(
+                "active"
+            );
+
+        });
+
+    const button =
+        document.querySelector(
+            `[data-tf="${tf}"]`
+        );
+
+    if (button) {
+
+        button.classList.add(
+            "active"
+        );
+
+    }
+
+    loadScanner();
+
+    loadChart();
+
+    loadBacktest();
 
 }
 
 
-/* =====================================================
+/* ========================================================
    SELECT INDEX
-   ===================================================== */
+======================================================== */
 
-function selectIndex(index) {
+function selectIndex(indexName) {
 
-    currentIndex = index;
+    currentIndex = indexName;
 
-    updateButtons();
+    document
+        .querySelectorAll(
+            "[data-index]"
+        )
+        .forEach(button => {
 
-    loadAll();
+            button.classList.remove(
+                "active"
+            );
+
+        });
+
+    const button =
+        document.querySelector(
+            `[data-index="${indexName}"]`
+        );
+
+    if (button) {
+
+        button.classList.add(
+            "active"
+        );
+
+    }
+
+    loadScanner();
+
+    loadChart();
+
+    loadBacktest();
 
 }
 
 
-/* =====================================================
+/* ========================================================
+   LOAD SCANNER
+======================================================== */
+
+async function loadScanner() {
+
+    const result =
+        document.getElementById(
+            "result"
+        );
+
+    result.innerHTML =
+        "Loading " +
+        currentTf +
+        " data...";
+
+    try {
+
+        const response =
+            await fetch(
+                "/api/scan?tf=" +
+                encodeURIComponent(
+                    currentTf
+                )
+            );
+
+        if (!response.ok) {
+
+            throw new Error(
+                "Scanner HTTP error"
+            );
+
+        }
+
+        const data =
+            await response.json();
+
+        const x =
+            data[currentIndex];
+
+        if (!x) {
+
+            result.innerHTML =
+                '<div class="error">' +
+                "No data available" +
+                "</div>";
+
+            return;
+
+        }
+
+        let cls = "wait";
+
+        if (
+            x.signal &&
+            x.signal.includes("CALL")
+        ) {
+
+            cls = "call";
+
+        }
+
+        else if (
+            x.signal &&
+            x.signal.includes("PUT")
+        ) {
+
+            cls = "put";
+
+        }
+
+        result.innerHTML = `
+
+        <div class="card">
+
+            <h2>
+                ${currentIndex}
+            </h2>
+
+            <div class="value">
+                Price:
+                ${x.price ?? "-"}
+            </div>
+
+            <div class="value">
+                EMA 9:
+                ${x.ema9 ?? "-"}
+            </div>
+
+            <div class="value">
+                EMA 15:
+                ${x.ema15 ?? "-"}
+            </div>
+
+            <div class="value">
+                VWAP:
+                ${x.vwap ?? "-"}
+            </div>
+
+            <div class="small">
+                Time:
+                ${x.time ?? "-"}
+            </div>
+
+            <h3 class="${cls}">
+                ${x.signal ?? "WAIT"}
+            </h3>
+
+        </div>
+
+        `;
+
+    }
+
+    catch (error) {
+
+        console.error(
+            error
+        );
+
+        result.innerHTML =
+            '<div class="error">' +
+            "Scanner error: " +
+            error.message +
+            "</div>";
+
+    }
+
+}
+
+
+/* ========================================================
    CREATE CHART
-   ===================================================== */
+======================================================== */
 
 function createChart() {
 
@@ -1705,11 +1646,28 @@ function createChart() {
             "chart"
         );
 
+    if (!container) {
+
+        return;
+
+    }
+
     if (chart) {
 
-        chart.remove();
+        try {
+
+            chart.remove();
+
+        }
+
+        catch (e) {
+
+            console.log(e);
+
+        }
 
         chart = null;
+
     }
 
     chart =
@@ -1720,27 +1678,45 @@ function createChart() {
                 width:
                     container.clientWidth,
 
-                height:520,
+                height:
+                    container.clientHeight,
 
                 layout: {
 
                     background: {
-                        color:"#0d141d"
+
+                        color:
+                            "#0d141d"
+
                     },
 
-                    textColor:"#cbd5e1"
+                    textColor:
+                        "#d1d5db"
 
                 },
 
                 grid: {
 
                     vertLines: {
-                        color:"#1b2633"
+
+                        color:
+                            "#182330"
+
                     },
 
                     horzLines: {
-                        color:"#1b2633"
+
+                        color:
+                            "#182330"
+
                     }
+
+                },
+
+                crosshair: {
+
+                    mode:
+                        LightweightCharts.CrosshairMode.Normal
 
                 },
 
@@ -1756,9 +1732,11 @@ function createChart() {
                     borderColor:
                         "#263241",
 
-                    timeVisible:true,
+                    timeVisible:
+                        true,
 
-                    secondsVisible:false
+                    secondsVisible:
+                        false
 
                 }
 
@@ -1766,110 +1744,140 @@ function createChart() {
         );
 
 
+    /* ====================================================
+       CANDLE SERIES
+    ==================================================== */
+
     candleSeries =
         chart.addCandlestickSeries({
 
-            upColor:"#22c55e",
+            upColor:
+                "#26a69a",
 
-            downColor:"#ef4444",
+            downColor:
+                "#ef5350",
 
-            borderUpColor:"#22c55e",
+            borderUpColor:
+                "#26a69a",
 
-            borderDownColor:"#ef4444",
+            borderDownColor:
+                "#ef5350",
 
-            wickUpColor:"#22c55e",
+            wickUpColor:
+                "#26a69a",
 
-            wickDownColor:"#ef4444"
+            wickDownColor:
+                "#ef5350"
 
         });
 
+
+    /* ====================================================
+       EMA 9
+    ==================================================== */
 
     ema9Series =
         chart.addLineSeries({
 
-            lineWidth:2,
+            color:
+                "#ffd21f",
 
-            color:"#facc15"
+            lineWidth:
+                2,
+
+            priceLineVisible:
+                false,
+
+            lastValueVisible:
+                true
 
         });
 
+
+    /* ====================================================
+       EMA 15
+    ==================================================== */
 
     ema15Series =
         chart.addLineSeries({
 
-            lineWidth:2,
+            color:
+                "#38bdf8",
 
-            color:"#38bdf8"
+            lineWidth:
+                2,
+
+            priceLineVisible:
+                false,
+
+            lastValueVisible:
+                true
 
         });
 
+
+    /* ====================================================
+       VWAP
+    ==================================================== */
 
     vwapSeries =
         chart.addLineSeries({
 
-            lineWidth:2,
+            color:
+                "#a855f7",
 
-            color:"#c084fc"
+            lineWidth:
+                2,
+
+            priceLineVisible:
+                false,
+
+            lastValueVisible:
+                true
 
         });
-
-
-    window.addEventListener(
-        "resize",
-        resizeChart
-    );
 
 }
 
 
-/* =====================================================
-   RESIZE CHART
-   ===================================================== */
-
-function resizeChart() {
-
-    const container =
-        document.getElementById(
-            "chart"
-        );
-
-    if (
-        chart &&
-        container
-    ) {
-
-        chart.applyOptions({
-
-            width:
-                container.clientWidth
-
-        });
-
-    }
-
-}
-
-
-/* =====================================================
-   LOAD CHART
-   ===================================================== */
+/* ========================================================
+   LOAD CHART DATA
+======================================================== */
 
 async function loadChart() {
 
     try {
 
-        const url =
-            "/api/chart?index="
-            + encodeURIComponent(
+        const symbol =
+            INDEX_SYMBOLS[
                 currentIndex
-            )
-            + "&tf="
-            + encodeURIComponent(
-                currentTF
-            );
+            ];
+
+        if (!symbol) {
+
+            return;
+
+        }
 
         const response =
-            await fetch(url);
+            await fetch(
+                "/api/chart?symbol=" +
+                encodeURIComponent(
+                    symbol
+                ) +
+                "&tf=" +
+                encodeURIComponent(
+                    currentTf
+                )
+            );
+
+        if (!response.ok) {
+
+            throw new Error(
+                "Chart HTTP error"
+            );
+
+        }
 
         const data =
             await response.json();
@@ -1879,16 +1887,15 @@ async function loadChart() {
             || data.length === 0
         ) {
 
+            console.log(
+                "No chart data"
+            );
+
             return;
 
         }
 
-        if (!chart) {
-
-            createChart();
-
-        }
-
+        createChart();
 
         const candles = [];
 
@@ -1901,116 +1908,241 @@ async function loadChart() {
         const markers = [];
 
 
-        data.forEach(
-            row => {
+        /* =================================================
+           CONVERT DATA
+        ================================================= */
 
-                candles.push({
+        data.forEach(row => {
 
-                    time:row.time,
+            const time =
+                Number(row.time);
 
-                    open:row.open,
+            const open =
+                Number(row.open);
 
-                    high:row.high,
+            const high =
+                Number(row.high);
 
-                    low:row.low,
+            const low =
+                Number(row.low);
 
-                    close:row.close
+            const close =
+                Number(row.close);
 
-                });
+            if (
+                !Number.isFinite(time)
+                || !Number.isFinite(open)
+                || !Number.isFinite(high)
+                || !Number.isFinite(low)
+                || !Number.isFinite(close)
+            ) {
 
+                return;
+
+            }
+
+
+            candles.push({
+
+                time:
+                    time,
+
+                open:
+                    open,
+
+                high:
+                    high,
+
+                low:
+                    low,
+
+                close:
+                    close
+
+            });
+
+
+            const e9 =
+                Number(row.ema9);
+
+            if (
+                Number.isFinite(e9)
+            ) {
 
                 ema9.push({
 
-                    time:row.time,
+                    time:
+                        time,
 
-                    value:row.ema9
+                    value:
+                        e9
 
                 });
 
+            }
+
+
+            const e15 =
+                Number(row.ema15);
+
+            if (
+                Number.isFinite(e15)
+            ) {
 
                 ema15.push({
 
-                    time:row.time,
+                    time:
+                        time,
 
-                    value:row.ema15
+                    value:
+                        e15
 
                 });
 
+            }
+
+
+            const vw =
+                Number(row.vwap);
+
+            if (
+                Number.isFinite(vw)
+            ) {
 
                 vwap.push({
 
-                    time:row.time,
+                    time:
+                        time,
 
-                    value:row.vwap
+                    value:
+                        vw
 
                 });
 
-
-                if (
-                    row.marker === "CALL"
-                ) {
-
-                    markers.push({
-
-                        time:row.time,
-
-                        position:"belowBar",
-
-                        color:"#22c55e",
-
-                        shape:"arrowUp",
-
-                        text:"CALL"
-
-                    });
-
-                }
+            }
 
 
-                if (
-                    row.marker === "PUT"
-                ) {
+            /* =============================================
+               CALL MARKER
+            ============================================= */
 
-                    markers.push({
+            if (
+                row.marker ===
+                "CALL"
+            ) {
 
-                        time:row.time,
+                markers.push({
 
-                        position:"aboveBar",
+                    time:
+                        time,
 
-                        color:"#ef4444",
+                    position:
+                        "belowBar",
 
-                        shape:"arrowDown",
+                    color:
+                        "#22c55e",
 
-                        text:"PUT"
+                    shape:
+                        "arrowUp",
 
-                    });
+                    text:
+                        "CALL"
 
-                }
+                });
 
             }
-        );
 
 
-        candleSeries.setData(
-            candles
-        );
+            /* =============================================
+               PUT MARKER
+            ============================================= */
 
-        ema9Series.setData(
-            ema9
-        );
+            else if (
+                row.marker ===
+                "PUT"
+            ) {
 
-        ema15Series.setData(
-            ema15
-        );
+                markers.push({
 
-        vwapSeries.setData(
-            vwap
-        );
+                    time:
+                        time,
 
+                    position:
+                        "aboveBar",
+
+                    color:
+                        "#ef4444",
+
+                    shape:
+                        "arrowDown",
+
+                    text:
+                        "PUT"
+
+                });
+
+            }
+
+        });
+
+
+        /* =================================================
+           SET SERIES
+        ================================================= */
 
         if (
-            candleSeries.setMarkers
+            candles.length > 0
         ) {
+
+            candleSeries.setData(
+                candles
+            );
+
+        }
+
+        if (
+            ema9.length > 0
+        ) {
+
+            ema9Series.setData(
+                ema9
+            );
+
+        }
+
+        if (
+            ema15.length > 0
+        ) {
+
+            ema15Series.setData(
+                ema15
+            );
+
+        }
+
+        if (
+            vwap.length > 0
+        ) {
+
+            vwapSeries.setData(
+                vwap
+            );
+
+        }
+
+
+        /* =================================================
+           SET MARKERS
+        ================================================= */
+
+        if (
+            markers.length > 0
+        ) {
+
+            markers.sort(
+                (a, b) =>
+                    a.time - b.time
+            );
 
             candleSeries.setMarkers(
                 markers
@@ -2019,15 +2151,20 @@ async function loadChart() {
         }
 
 
-        chart.timeScale()
+        /* =================================================
+           FIT CONTENT
+        ================================================= */
+
+        chart
+            .timeScale()
             .fitContent();
 
     }
 
-    catch(error) {
+    catch (error) {
 
-        console.log(
-            "Chart error:",
+        console.error(
+            "CHART ERROR:",
             error
         );
 
@@ -2036,270 +2173,238 @@ async function loadChart() {
 }
 
 
-/* =====================================================
-   LOAD SCANNER
-   ===================================================== */
+/* ========================================================
+   LOAD BACKTEST
+======================================================== */
 
-async function loadScanner() {
+async function loadBacktest() {
 
-    const result =
+    const box =
         document.getElementById(
-            "result"
+            "backtest"
         );
+
+    box.innerHTML =
+        "Loading backtest...";
 
     try {
 
-        const url =
-            "/api/scanner?index="
-            + encodeURIComponent(
+        const symbol =
+            INDEX_SYMBOLS[
                 currentIndex
-            )
-            + "&tf="
-            + encodeURIComponent(
-                currentTF
-            );
+            ];
 
         const response =
-            await fetch(url);
+            await fetch(
+                "/api/backtest?symbol=" +
+                encodeURIComponent(
+                    symbol
+                ) +
+                "&tf=" +
+                encodeURIComponent(
+                    currentTf
+                )
+            );
+
+        if (!response.ok) {
+
+            throw new Error(
+                "Backtest HTTP error"
+            );
+
+        }
 
         const data =
             await response.json();
 
 
-        if (data.error) {
-
-            result.innerHTML =
-                "<div class='error'>"
-                + data.error
-                + "</div>";
-
-            return;
-
-        }
-
-
-        let signalClass =
-            "wait";
-
-        let signalText =
-            data.signal;
-
+        let winClass =
+            "yellow";
 
         if (
-            data.signal === "CALL"
+            data.win_rate >= 50
         ) {
 
-            signalClass = "call";
-
-            signalText =
-                "🟢 CALL";
+            winClass =
+                "green";
 
         }
 
         else if (
-            data.signal === "PUT"
+            data.win_rate < 40
         ) {
 
-            signalClass = "put";
+            winClass =
+                "red";
 
-            signalText =
-                "🔴 PUT";
+        }
+
+
+        let pointsClass =
+            "yellow";
+
+        if (
+            data.net_points > 0
+        ) {
+
+            pointsClass =
+                "green";
+
+        }
+
+        else if (
+            data.net_points < 0
+        ) {
+
+            pointsClass =
+                "red";
+
+        }
+
+
+        let html = `
+
+        <div class="stats">
+
+            <div class="stat">
+
+                <div class="stat-title">
+                    Total Trades
+                </div>
+
+                <div class="stat-value">
+                    ${data.total_trades}
+                </div>
+
+            </div>
+
+
+            <div class="stat">
+
+                <div class="stat-title">
+                    Wins
+                </div>
+
+                <div class="stat-value green">
+                    ${data.wins}
+                </div>
+
+            </div>
+
+
+            <div class="stat">
+
+                <div class="stat-title">
+                    Losses
+                </div>
+
+                <div class="stat-value red">
+                    ${data.losses}
+                </div>
+
+            </div>
+
+
+            <div class="stat">
+
+                <div class="stat-title">
+                    Win Rate
+                </div>
+
+                <div class="stat-value ${winClass}">
+                    ${data.win_rate}%
+                </div>
+
+            </div>
+
+
+            <div class="stat">
+
+                <div class="stat-title">
+                    Net Points
+                </div>
+
+                <div class="stat-value ${pointsClass}">
+                    ${data.net_points}
+                </div>
+
+            </div>
+
+        </div>
+
+        <h3>
+            Recent Trades
+        </h3>
+
+        `;
+
+
+        const trades =
+            Array.isArray(
+                data.trades
+            )
+            ? data.trades
+            : [];
+
+
+        if (
+            trades.length === 0
+        ) {
+
+            html +=
+                '<div class="small">' +
+                "No trades found" +
+                "</div>";
 
         }
 
         else {
 
-            signalText =
-                "🟡 WAIT";
-
-        }
-
-
-        result.innerHTML = `
-
-            <div class="signal ${signalClass}">
-                ${signalText}
-            </div>
-
-            <div class="value">
-                <b>Index:</b>
-                ${currentIndex}
-            </div>
-
-            <div class="value">
-                <b>Timeframe:</b>
-                ${currentTF}
-            </div>
-
-            <div class="value">
-                <b>Price:</b>
-                ${formatNumber(data.price)}
-            </div>
-
-            <div class="value">
-                <b>EMA 9:</b>
-                ${formatNumber(data.ema9)}
-            </div>
-
-            <div class="value">
-                <b>EMA 15:</b>
-                ${formatNumber(data.ema15)}
-            </div>
-
-            <div class="value">
-                <b>VWAP:</b>
-                ${formatNumber(data.vwap)}
-            </div>
-
-            <div class="small">
-                ${data.time || ""}
-            </div>
-        `;
-
-    }
-
-    catch(error) {
-
-        result.innerHTML =
-            "<div class='error'>"
-            + "Scanner error"
-            + "</div>";
-
-        console.log(error);
-
-    }
-
-}
+            const recent =
+                trades.slice(
+                    -20
+                ).reverse();
 
 
-/* =====================================================
-   LOAD BACKTEST
-   ===================================================== */
-
-async function loadBacktest() {
-
-    try {
-
-        const url =
-            "/api/backtest?index="
-            + encodeURIComponent(
-                currentIndex
-            )
-            + "&tf="
-            + encodeURIComponent(
-                currentTF
-            );
-
-        const response =
-            await fetch(url);
-
-        const data =
-            await response.json();
-
-
-        document.getElementById(
-            "totalTrades"
-        ).textContent =
-            data.total_trades ?? "-";
-
-
-        document.getElementById(
-            "wins"
-        ).textContent =
-            data.wins ?? "-";
-
-
-        document.getElementById(
-            "losses"
-        ).textContent =
-            data.losses ?? "-";
-
-
-        document.getElementById(
-            "winRate"
-        ).textContent =
-            data.win_rate !== undefined
-            ? data.win_rate + "%"
-            : "-";
-
-
-        document.getElementById(
-            "netPoints"
-        ).textContent =
-            data.net_points ?? "-";
-
-
-        const trades =
-            document.getElementById(
-                "trades"
-            );
-
-
-        if (
-            !data.trades ||
-            data.trades.length === 0
-        ) {
-
-            trades.innerHTML =
-                "<div class='small'>"
-                + "No trades"
-                + "</div>";
-
-            return;
-
-        }
-
-
-        const recent =
-            data.trades
-                .slice(-20)
-                .reverse();
-
-
-        trades.innerHTML =
-            recent.map(
-                t => {
+            recent.forEach(
+                trade => {
 
                     const cls =
-                        t.result === "WIN"
-                        ? "win"
-                        : "loss";
+                        trade.result ===
+                        "WIN"
+                        ? "green"
+                        : "red";
 
-                    return `
+
+                    html += `
 
                     <div class="trade">
 
-                        <b>${t.type}</b>
+                        <b>
+                            ${trade.type}
+                        </b>
 
-                        &nbsp; |
+                        &nbsp;
 
                         Entry:
-                        ${t.entry}
+                        ${trade.entry}
 
-                        &nbsp; |
+                        &nbsp;
 
                         Exit:
-                        ${t.exit}
+                        ${trade.exit}
 
-                        &nbsp; |
+                        &nbsp;
 
                         Points:
                         <span class="${cls}">
-                            ${t.points}
+                            ${trade.points}
                         </span>
 
-                        &nbsp; |
+                        &nbsp;
 
                         <span class="${cls}">
-                            ${t.result}
-                        </span>
-
-                        <br>
-
-                        <span class="small">
-                            ${t.entry_time}
-                            →
-                            ${t.exit_time}
+                            ${trade.result}
                         </span>
 
                     </div>
@@ -2307,76 +2412,96 @@ async function loadBacktest() {
                     `;
 
                 }
-            )
-            .join("");
+            );
+
+        }
+
+
+        box.innerHTML =
+            html;
 
     }
 
-    catch(error) {
+    catch (error) {
 
-        console.log(
-            "Backtest error:",
+        console.error(
             error
         );
 
-    }
-
-}
-
-
-/* =====================================================
-   LOAD EVERYTHING
-   ===================================================== */
-
-async function loadAll() {
-
-    await loadScanner();
-
-    await loadChart();
-
-    await loadBacktest();
-
-}
-
-
-/* =====================================================
-   AUTO REFRESH
-   ===================================================== */
-
-function startAutoRefresh() {
-
-    if (refreshTimer) {
-
-        clearInterval(
-            refreshTimer
-        );
+        box.innerHTML =
+            '<div class="error">' +
+            "Backtest error: " +
+            error.message +
+            "</div>";
 
     }
 
-    refreshTimer =
-        setInterval(
-            loadAll,
-            30000
-        );
-
 }
 
 
-/* =====================================================
+/* ========================================================
+   RESIZE CHART
+======================================================== */
+
+window.addEventListener(
+    "resize",
+    () => {
+
+        const container =
+            document.getElementById(
+                "chart"
+            );
+
+        if (
+            chart &&
+            container
+        ) {
+
+            chart.applyOptions({
+
+                width:
+                    container.clientWidth,
+
+                height:
+                    container.clientHeight
+
+            });
+
+        }
+
+    }
+);
+
+
+/* ========================================================
    INITIAL LOAD
-   ===================================================== */
+======================================================== */
 
-document.addEventListener(
-    "DOMContentLoaded",
-    function() {
+window.addEventListener(
+    "load",
+    () => {
 
-        updateButtons();
+        document
+            .querySelector(
+                '[data-tf="5m"]'
+            )
+            .classList.add(
+                "active"
+            );
 
-        createChart();
+        document
+            .querySelector(
+                '[data-index="NIFTY 50"]'
+            )
+            .classList.add(
+                "active"
+            );
 
-        loadAll();
+        loadScanner();
 
-        startAutoRefresh();
+        loadChart();
+
+        loadBacktest();
 
     }
 );
@@ -2392,94 +2517,65 @@ document.addEventListener(
 
 
 # =========================================================
-# API - SCANNER
+# API: SCANNER
 # =========================================================
 
-@app.route(
-    "/api/scanner"
-)
-def api_scanner():
+@app.route("/api/scan")
+def api_scan():
 
-    index_name = request.args.get(
-        "index",
-        "NIFTY 50"
-    )
-
-    tf = request.args.get(
+    timeframe = request.args.get(
         "tf",
         "5m"
     )
 
-    if index_name not in INDICES:
+    if timeframe not in TIMEFRAMES:
 
-        return jsonify({
-            "error":
-                "Invalid index"
-        }), 400
+        timeframe = "5m"
 
-    if tf not in TIMEFRAMES:
+    result = {}
 
-        return jsonify({
-            "error":
-                "Invalid timeframe"
-        }), 400
+    for name, symbol in INDICES.items():
 
-    symbol = INDICES[
-        index_name
-    ]
+        data = download_data(
+            symbol,
+            timeframe
+        )
 
-    data = download_data(
-        symbol,
-        tf
-    )
-
-    result = calculate_scanner(
-        data
-    )
+        result[name] = calculate_scanner(
+            data
+        )
 
     return jsonify(result)
 
 
 # =========================================================
-# API - CHART
+# API: CHART
 # =========================================================
 
-@app.route(
-    "/api/chart"
-)
+@app.route("/api/chart")
 def api_chart():
 
-    index_name = request.args.get(
-        "index",
-        "NIFTY 50"
+    symbol = request.args.get(
+        "symbol",
+        "^NSEI"
     )
 
-    tf = request.args.get(
+    timeframe = request.args.get(
         "tf",
         "5m"
     )
 
-    if index_name not in INDICES:
+    if timeframe not in TIMEFRAMES:
 
-        return jsonify({
-            "error":
-                "Invalid index"
-        }), 400
+        timeframe = "5m"
 
-    if tf not in TIMEFRAMES:
+    if symbol not in INDICES.values():
 
-        return jsonify({
-            "error":
-                "Invalid timeframe"
-        }), 400
-
-    symbol = INDICES[
-        index_name
-    ]
+        symbol = "^NSEI"
 
     data = download_data(
         symbol,
-        tf
+        timeframe
     )
 
     result = chart_json(
@@ -2490,45 +2586,33 @@ def api_chart():
 
 
 # =========================================================
-# API - BACKTEST
+# API: BACKTEST
 # =========================================================
 
-@app.route(
-    "/api/backtest"
-)
+@app.route("/api/backtest")
 def api_backtest():
 
-    index_name = request.args.get(
-        "index",
-        "NIFTY 50"
+    symbol = request.args.get(
+        "symbol",
+        "^NSEI"
     )
 
-    tf = request.args.get(
+    timeframe = request.args.get(
         "tf",
         "5m"
     )
 
-    if index_name not in INDICES:
+    if timeframe not in TIMEFRAMES:
 
-        return jsonify({
-            "error":
-                "Invalid index"
-        }), 400
+        timeframe = "5m"
 
-    if tf not in TIMEFRAMES:
+    if symbol not in INDICES.values():
 
-        return jsonify({
-            "error":
-                "Invalid timeframe"
-        }), 400
-
-    symbol = INDICES[
-        index_name
-    ]
+        symbol = "^NSEI"
 
     data = download_data(
         symbol,
-        tf
+        timeframe
     )
 
     result = run_backtest(
@@ -2539,28 +2623,14 @@ def api_backtest():
 
 
 # =========================================================
-# API - HEALTH
+# HEALTH CHECK
 # =========================================================
 
-@app.route(
-    "/api/health"
-)
-def api_health():
+@app.route("/health")
+def health():
 
     return jsonify({
-
-        "status":
-            "ok",
-
-        "scanner":
-            "running",
-
-        "chart":
-            "running",
-
-        "backtest":
-            "running"
-
+        "status": "ok"
     })
 
 
@@ -2573,12 +2643,11 @@ if __name__ == "__main__":
     port = int(
         os.environ.get(
             "PORT",
-            5000
+            10000
         )
     )
 
     app.run(
         host="0.0.0.0",
-        port=port,
-        debug=False
+        port=port
     )
