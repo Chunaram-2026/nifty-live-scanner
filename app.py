@@ -3,10 +3,8 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
-import json
 import time
-import math
-from datetime import datetime, timedelta
+from datetime import datetime
 import plotly.graph_objects as go
 
 
@@ -36,13 +34,6 @@ st.markdown("""
 .block-container {
     padding-top: 1rem;
     padding-bottom: 2rem;
-}
-
-div[data-testid="stMetric"] {
-    background: #172231;
-    border: 1px solid #26384b;
-    padding: 12px;
-    border-radius: 10px;
 }
 
 .metric-box {
@@ -81,13 +72,6 @@ div[data-testid="stMetric"] {
     font-weight: 800;
 }
 
-.section-title {
-    font-size: 18px;
-    font-weight: 700;
-    margin-top: 12px;
-    margin-bottom: 8px;
-}
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -110,20 +94,23 @@ if "last_trade_signal_time" not in st.session_state:
 
 
 # ============================================================
-# CONSTANTS
+# INDEX CONFIG
 # ============================================================
 
 INDEX_CONFIG = {
+
     "NIFTY 50": {
         "yahoo": "^NSEI",
         "nse": "NIFTY",
         "strike_step": 50
     },
+
     "BANK NIFTY": {
         "yahoo": "^NSEBANK",
         "nse": "BANKNIFTY",
         "strike_step": 100
     },
+
     "SENSEX": {
         "yahoo": "^BSESN",
         "nse": "SENSEX",
@@ -132,39 +119,52 @@ INDEX_CONFIG = {
 }
 
 
+# ============================================================
+# TIMEFRAME CONFIG
+# ============================================================
+
 TIMEFRAME_CONFIG = {
+
     "1m": {
         "interval": "1m",
         "period": "1d"
     },
+
     "2m": {
         "interval": "2m",
         "period": "5d"
     },
+
     "3m": {
         "interval": "5m",
         "period": "5d"
     },
+
     "5m": {
         "interval": "5m",
         "period": "5d"
     },
+
     "15m": {
         "interval": "15m",
         "period": "5d"
     },
+
     "1h": {
         "interval": "60m",
         "period": "1mo"
     },
+
     "2h": {
         "interval": "60m",
         "period": "1mo"
     },
+
     "1d": {
         "interval": "1d",
         "period": "6mo"
     },
+
     "1wk": {
         "interval": "1wk",
         "period": "2y"
@@ -224,28 +224,39 @@ def get_market_data(symbol, timeframe):
 
     config = TIMEFRAME_CONFIG[timeframe]
 
-    ticker = yf.Ticker(symbol)
+    try:
 
-    df = ticker.history(
-        period=config["period"],
-        interval=config["interval"],
-        auto_adjust=False
-    )
+        df = yf.download(
+            symbol,
+            period=config["period"],
+            interval=config["interval"],
+            auto_adjust=False,
+            progress=False
+        )
 
-    if df is None or df.empty:
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        df = df.copy()
+
+        # Fix MultiIndex columns from yfinance
+        if isinstance(df.columns, pd.MultiIndex):
+
+            df.columns = [
+                col[0]
+                for col in df.columns
+            ]
+
+        df.columns = [
+            str(col).capitalize()
+            for col in df.columns
+        ]
+
+        return df
+
+    except Exception:
+
         return pd.DataFrame()
-
-    df = df.copy()
-
-    df.columns = [
-        str(x).capitalize()
-        for x in df.columns
-    ]
-
-    if "Datetime" in df.columns:
-        df = df.set_index("Datetime")
-
-    return df
 
 
 # ============================================================
@@ -270,7 +281,7 @@ def calculate_indicators(df):
         .mean()
     )
 
-    # Typical Price
+    # Typical price
     data["TypicalPrice"] = (
         data["High"]
         + data["Low"]
@@ -280,59 +291,53 @@ def calculate_indicators(df):
     # VWAP
     volume = data["Volume"].replace(0, np.nan)
 
-    cumulative_tp_volume = (
+    tp_volume = (
         data["TypicalPrice"] * volume
-    ).cumsum()
-
-    cumulative_volume = volume.cumsum()
-
-    data["VWAP"] = (
-        cumulative_tp_volume /
-        cumulative_volume
     )
 
-    # fallback
+    data["VWAP"] = (
+        tp_volume.cumsum()
+        /
+        volume.cumsum()
+    )
+
     data["VWAP"] = (
         data["VWAP"]
+        .replace([np.inf, -np.inf], np.nan)
         .fillna(data["TypicalPrice"])
     )
 
     # Candle body
     data["Body"] = (
-        data["Close"] -
-        data["Open"]
+        data["Close"]
+        - data["Open"]
     ).abs()
-
-    # Candle range
-    data["Range"] = (
-        data["High"] -
-        data["Low"]
-    ).replace(0, np.nan)
 
     # Upper wick
     data["UpperWick"] = (
-        data["High"] -
-        data[["Open", "Close"]].max(axis=1)
+        data["High"]
+        - data[["Open", "Close"]].max(axis=1)
     )
 
     # Lower wick
     data["LowerWick"] = (
-        data[["Open", "Close"]].min(axis=1) -
-        data["Low"]
+        data[["Open", "Close"]].min(axis=1)
+        - data["Low"]
     )
 
     return data
 
 
 # ============================================================
-# OPTION CHAIN
+# NSE OPTION CHAIN
 # ============================================================
 
 def get_nse_session():
 
     session = requests.Session()
 
-    headers = {
+    session.headers.update({
+
         "User-Agent": (
             "Mozilla/5.0 "
             "(Windows NT 10.0; Win64; x64) "
@@ -340,19 +345,20 @@ def get_nse_session():
             "(KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
 
-    session.headers.update(headers)
+        "Accept": (
+            "application/json, text/plain, */*"
+        ),
 
-    try:
-        session.get(
-            "https://www.nseindia.com",
-            timeout=10
+        "Accept-Language": (
+            "en-US,en;q=0.9"
+        ),
+
+        "Referer": (
+            "https://www.nseindia.com/"
         )
-    except Exception:
-        pass
+
+    })
 
     return session
 
@@ -362,34 +368,39 @@ def get_option_chain(index_name):
 
     nse_symbol = INDEX_CONFIG[index_name]["nse"]
 
-    session = get_nse_session()
-
     try:
 
+        session = get_nse_session()
+
+        session.get(
+            "https://www.nseindia.com",
+            timeout=15
+        )
+
+        time.sleep(0.5)
+
         url = (
-            "https://www.nseindia.com/"
-            "api/option-chain-indices"
-            f"?symbol={nse_symbol}"
+            "https://www.nseindia.com/api/"
+            f"option-chain-indices?symbol={nse_symbol}"
         )
 
         response = session.get(
             url,
-            timeout=15
+            timeout=20
         )
 
         if response.status_code != 200:
             return None
 
-        data = response.json()
-
-        return data
+        return response.json()
 
     except Exception:
+
         return None
 
 
 # ============================================================
-# EXPIRY DATE
+# NEAREST EXPIRY
 # ============================================================
 
 def get_nearest_expiry(option_chain):
@@ -413,14 +424,15 @@ def get_nearest_expiry(option_chain):
 
             try:
 
-                date_obj = datetime.strptime(
+                expiry_date = datetime.strptime(
                     expiry,
                     "%d-%b-%Y"
                 ).date()
 
-                if date_obj >= today:
+                if expiry_date >= today:
+
                     valid_dates.append(
-                        (date_obj, expiry)
+                        (expiry_date, expiry)
                     )
 
             except Exception:
@@ -437,6 +449,7 @@ def get_nearest_expiry(option_chain):
         return expiry_dates[0]
 
     except Exception:
+
         return None
 
 
@@ -448,7 +461,8 @@ def find_option_contract(
     option_chain,
     spot_price,
     option_type,
-    index_name
+    index_name,
+    locked_strike=None
 ):
 
     if option_chain is None:
@@ -473,37 +487,12 @@ def find_option_contract(
             index_name
         ]["strike_step"]
 
-        atm_strike = round(
-            spot_price / strike_step
-        ) * strike_step
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # User requested:
-        # OTM option नहीं चाहिए
-        #
-        # CALL:
-        # ATM या थोड़ा ITM
-        #
-        # PUT:
-        # ATM या थोड़ा ITM
-        # ----------------------------------------------------
-
-        if option_type == "CE":
-
-            preferred_strikes = [
-                atm_strike,
-                atm_strike - strike_step,
-                atm_strike - (2 * strike_step)
-            ]
-
-        else:
-
-            preferred_strikes = [
-                atm_strike,
-                atm_strike + strike_step,
-                atm_strike + (2 * strike_step)
-            ]
+        atm_strike = (
+            round(
+                spot_price / strike_step
+            )
+            * strike_step
+        )
 
         available = []
 
@@ -512,14 +501,14 @@ def find_option_contract(
             if row.get("expiryDate") != expiry:
                 continue
 
+            if option_type not in row:
+                continue
+
             strike = safe_float(
                 row.get("strikePrice")
             )
 
             if strike is None:
-                continue
-
-            if option_type not in row:
                 continue
 
             option_data = row.get(
@@ -531,142 +520,151 @@ def find_option_contract(
                 option_data.get("lastPrice")
             )
 
-            if premium is None:
-                continue
-
-            if premium <= 0:
+            if premium is None or premium <= 0:
                 continue
 
             available.append({
+
                 "strike": strike,
+
                 "premium": premium,
+
                 "data": option_data,
+
                 "expiry": expiry
             })
 
         if not available:
             return None
 
-        # Prefer ATM / ITM only
-        for strike in preferred_strikes:
+        # IMPORTANT:
+        # Running trade must keep SAME strike
+        if locked_strike is not None:
 
             matches = [
+
                 x for x in available
-                if x["strike"] == strike
+
+                if x["strike"] == locked_strike
+
             ]
 
             if matches:
 
                 selected = matches[0]
 
-                option_data = selected["data"]
-
                 return {
-                    "option_type": option_type,
-                    "strike": selected["strike"],
-                    "premium": selected["premium"],
-                    "expiry": selected["expiry"],
-                    "symbol": (
-                        f"{index_name} "
-                        f"{int(selected['strike'])} "
-                        f"{option_type}"
-                    ),
-                    "oi": safe_float(
-                        option_data.get(
-                            "openInterest"
-                        ),
-                        0
-                    ),
-                    "volume": safe_float(
-                        option_data.get(
-                            "totalTradedVolume"
-                        ),
-                        0
-                    )
+
+                    "option_type":
+                        option_type,
+
+                    "strike":
+                        selected["strike"],
+
+                    "premium":
+                        selected["premium"],
+
+                    "expiry":
+                        selected["expiry"],
+
+                    "symbol":
+                        (
+                            f"{index_name} "
+                            f"{int(selected['strike'])} "
+                            f"{option_type}"
+                        )
                 }
 
-        # Fallback nearest suitable ITM / ATM
+        # ATM / ITM preference
         if option_type == "CE":
 
-            valid = [
-                x for x in available
-                if x["strike"] <= spot_price
+            preferred_strikes = [
+
+                atm_strike,
+
+                atm_strike - strike_step,
+
+                atm_strike - (
+                    2 * strike_step
+                )
             ]
 
         else:
 
-            valid = [
-                x for x in available
-                if x["strike"] >= spot_price
+            preferred_strikes = [
+
+                atm_strike,
+
+                atm_strike + strike_step,
+
+                atm_strike + (
+                    2 * strike_step
+                )
             ]
 
-        if valid:
+        for strike in preferred_strikes:
 
-            valid.sort(
-                key=lambda x:
-                abs(
-                    x["strike"] -
-                    atm_strike
-                )
-            )
+            matches = [
 
-            selected = valid[0]
+                x for x in available
 
-            option_data = selected["data"]
+                if x["strike"] == strike
 
-            return {
-                "option_type": option_type,
-                "strike": selected["strike"],
-                "premium": selected["premium"],
-                "expiry": selected["expiry"],
-                "symbol": (
-                    f"{index_name} "
-                    f"{int(selected['strike'])} "
-                    f"{option_type}"
-                ),
-                "oi": safe_float(
-                    option_data.get(
-                        "openInterest"
-                    ),
-                    0
-                ),
-                "volume": safe_float(
-                    option_data.get(
-                        "totalTradedVolume"
-                    ),
-                    0
-                )
-            }
+            ]
+
+            if matches:
+
+                selected = matches[0]
+
+                return {
+
+                    "option_type":
+                        option_type,
+
+                    "strike":
+                        selected["strike"],
+
+                    "premium":
+                        selected["premium"],
+
+                    "expiry":
+                        selected["expiry"],
+
+                    "symbol":
+                        (
+                            f"{index_name} "
+                            f"{int(selected['strike'])} "
+                            f"{option_type}"
+                        )
+                }
 
         return None
 
     except Exception:
+
         return None
 
 
 # ============================================================
-# SIGNAL CONDITIONS
+# SIGNAL ENGINE
 # ============================================================
 
 def get_signal(data):
-
-    if data is None:
-        return None
 
     if len(data) < 20:
         return None
 
     last = data.iloc[-1]
+
     previous = data.iloc[-2]
 
     price = safe_float(last["Close"])
-    ema9 = safe_float(last["EMA9"])
-    ema15 = safe_float(last["EMA15"])
-    vwap = safe_float(last["VWAP"])
 
-    previous_close = safe_float(
-        previous["Close"]
-    )
+    ema9 = safe_float(last["EMA9"])
+
+    ema15 = safe_float(last["EMA15"])
+
+    vwap = safe_float(last["VWAP"])
 
     previous_ema9 = safe_float(
         previous["EMA9"]
@@ -676,14 +674,9 @@ def get_signal(data):
         previous["EMA15"]
     )
 
-    candle_range = (
-        safe_float(last["High"]) -
-        safe_float(last["Low"])
-    )
-
-    body = abs(
-        safe_float(last["Close"]) -
-        safe_float(last["Open"])
+    body = safe_float(
+        last["Body"],
+        0
     )
 
     lower_wick = safe_float(
@@ -696,78 +689,65 @@ def get_signal(data):
         0
     )
 
-    if candle_range is None:
-        candle_range = 0
-
-    # --------------------------------------------------------
-    # TREND CONDITIONS
-    # --------------------------------------------------------
-
     bullish_trend = (
-        price > ema9 and
-        ema9 > ema15 and
-        price > vwap
+
+        price > ema9
+
+        and ema9 > ema15
+
+        and price > vwap
     )
 
     bearish_trend = (
-        price < ema9 and
-        ema9 < ema15 and
-        price < vwap
+
+        price < ema9
+
+        and ema9 < ema15
+
+        and price < vwap
     )
 
-    # --------------------------------------------------------
-    # EMA CROSS
-    # --------------------------------------------------------
-
     bullish_cross = (
-        previous_ema9 <= previous_ema15
-        and
-        ema9 > ema15
+
+        previous_ema9
+        <= previous_ema15
+
+        and ema9 > ema15
     )
 
     bearish_cross = (
-        previous_ema9 >= previous_ema15
-        and
-        ema9 < ema15
+
+        previous_ema9
+        >= previous_ema15
+
+        and ema9 < ema15
     )
 
-    # --------------------------------------------------------
-    # CANDLE DIRECTION
-    # --------------------------------------------------------
-
     bullish_candle = (
-        price >
-        safe_float(last["Open"])
+        last["Close"]
+        > last["Open"]
     )
 
     bearish_candle = (
-        price <
-        safe_float(last["Open"])
+        last["Close"]
+        < last["Open"]
     )
 
-    # --------------------------------------------------------
-    # LIQUIDITY SWEEP / REJECTION
-    # --------------------------------------------------------
-
     bullish_rejection = (
-        lower_wick >
-        body * 1.2
-        and
-        price >
-        safe_float(last["Open"])
+
+        lower_wick
+        > body * 1.2
+
+        and bullish_candle
     )
 
     bearish_rejection = (
-        upper_wick >
-        body * 1.2
-        and
-        price <
-        safe_float(last["Open"])
-    )
 
-    # --------------------------------------------------------
-    # BREAKOUT
-    # --------------------------------------------------------
+        upper_wick
+        > body * 1.2
+
+        and bearish_candle
+    )
 
     recent_high = (
         data["High"]
@@ -788,10 +768,6 @@ def get_signal(data):
     bearish_breakdown = (
         price < recent_low
     )
-
-    # --------------------------------------------------------
-    # SCORE
-    # --------------------------------------------------------
 
     call_score = 0
     put_score = 0
@@ -826,10 +802,6 @@ def get_signal(data):
     if bearish_breakdown:
         put_score += 2
 
-    # --------------------------------------------------------
-    # FINAL SIGNAL
-    # --------------------------------------------------------
-
     signal = "WAIT"
     strength = "LOW"
     reason = []
@@ -838,11 +810,14 @@ def get_signal(data):
 
         signal = "CALL"
 
-        if call_score >= 7:
-            strength = "STRONG"
+        strength = (
+            "STRONG"
+            if call_score >= 7
+            else "MEDIUM"
+        )
 
         reason.append(
-            "Bullish EMA + VWAP structure"
+            "Bullish EMA + VWAP"
         )
 
         if bullish_rejection:
@@ -859,11 +834,14 @@ def get_signal(data):
 
         signal = "PUT"
 
-        if put_score >= 7:
-            strength = "STRONG"
+        strength = (
+            "STRONG"
+            if put_score >= 7
+            else "MEDIUM"
+        )
 
         reason.append(
-            "Bearish EMA + VWAP structure"
+            "Bearish EMA + VWAP"
         )
 
         if bearish_rejection:
@@ -879,25 +857,37 @@ def get_signal(data):
     else:
 
         reason.append(
-            "Signal conditions not strong enough"
+            "Conditions not strong enough"
         )
 
     return {
+
         "signal": signal,
+
         "strength": strength,
+
         "price": price,
+
         "ema9": ema9,
+
         "ema15": ema15,
+
         "vwap": vwap,
+
         "call_score": call_score,
+
         "put_score": put_score,
-        "reason": " | ".join(reason),
-        "time": data.index[-1]
+
+        "reason":
+            " | ".join(reason),
+
+        "time":
+            data.index[-1]
     }
 
 
 # ============================================================
-# INDEX SL / TARGET CALCULATION
+# INDEX LEVELS
 # ============================================================
 
 def calculate_index_levels(
@@ -906,111 +896,105 @@ def calculate_index_levels(
 ):
 
     signal = signal_data["signal"]
+
     entry = signal_data["price"]
 
     last = data.iloc[-1]
 
     candle_range = (
-        safe_float(last["High"]) -
+        safe_float(last["High"])
+        -
         safe_float(last["Low"])
     )
 
-    # Maximum 10-15 point style risk
     risk = max(
         8,
         min(
             15,
-            candle_range * 0.50
+            candle_range * 0.5
         )
     )
 
     if signal == "CALL":
 
-        stop_loss = entry - risk
+        sl = entry - risk
 
-        target1 = entry + risk
+        t1 = entry + risk
 
-        target2 = entry + (
+        t2 = entry + (
             risk * 2
         )
 
     elif signal == "PUT":
 
-        stop_loss = entry + risk
+        sl = entry + risk
 
-        target1 = entry - risk
+        t1 = entry - risk
 
-        target2 = entry - (
+        t2 = entry - (
             risk * 2
         )
 
     else:
 
         return {
+
             "entry": entry,
+
             "stop_loss": None,
+
             "target1": None,
+
             "target2": None,
+
             "risk": None
         }
 
     return {
+
         "entry": entry,
-        "stop_loss": stop_loss,
-        "target1": target1,
-        "target2": target2,
+
+        "stop_loss": sl,
+
+        "target1": t1,
+
+        "target2": t2,
+
         "risk": risk
     }
 
 
 # ============================================================
-# OPTION PREMIUM SL / TARGET
+# OPTION PREMIUM LEVELS
 # ============================================================
 
-def calculate_option_levels(
-    option_premium
-):
-
-    # --------------------------------------------------------
-    # OPTION PREMIUM RISK
-    #
-    # Premium SL = 20%
-    #
-    # Target 1 = +20%  -> 1:1
-    # Target 2 = +40%  -> 1:2
-    #
-    # At Target 1:
-    # SL moves to Entry Price
-    # --------------------------------------------------------
+def calculate_option_levels(option_premium):
 
     risk_percent = 0.20
 
-    risk_amount = (
-        option_premium *
-        risk_percent
-    )
-
-    option_sl = (
-        option_premium -
-        risk_amount
-    )
-
-    target1 = (
-        option_premium +
-        risk_amount
-    )
-
-    target2 = (
-        option_premium +
-        risk_amount * 2
+    risk = (
+        option_premium
+        * risk_percent
     )
 
     return {
-        "entry": option_premium,
-        "sl": option_sl,
-        "target1": target1,
-        "target2": target2,
-        "risk": risk_amount
+
+        "entry":
+            option_premium,
+
+        "sl":
+            option_premium - risk,
+
+        "target1":
+            option_premium + risk,
+
+        "target2":
+            option_premium + (
+                risk * 2
+            ),
+
+        "risk":
+            risk
     }
 
 
@@ -1025,13 +1009,13 @@ def create_trade(
     option_levels
 ):
 
-    if option_contract is None:
-        return None
-
     return {
-        "signal": signal_data["signal"],
 
-        "status": "RUNNING",
+        "signal":
+            signal_data["signal"],
+
+        "status":
+            "RUNNING",
 
         "entry_time":
             datetime.now(),
@@ -1047,13 +1031,6 @@ def create_trade(
 
         "index_target2":
             index_levels["target2"],
-
-        "index_risk":
-            index_levels["risk"],
-
-        # -----------------------------------------
-        # OPTION
-        # -----------------------------------------
 
         "option_symbol":
             option_contract["symbol"],
@@ -1085,15 +1062,14 @@ def create_trade(
         "option_risk":
             option_levels["risk"],
 
-        # -----------------------------------------
-        # TRAILING
-        # -----------------------------------------
-
         "target1_hit":
             False,
 
         "trailing_active":
             False,
+
+        "highest_premium":
+            option_levels["entry"],
 
         "trailing_sl":
             option_levels["sl"],
@@ -1113,7 +1089,43 @@ def create_trade(
 
 
 # ============================================================
-# UPDATE RUNNING TRADE
+# CLOSE RUNNING TRADE
+# ============================================================
+
+def close_running_trade():
+
+    trade = (
+        st.session_state.running_trade
+    )
+
+    if trade is None:
+        return
+
+    exit_premium = (
+        trade["exit_premium"]
+    )
+
+    trade["points"] = (
+        exit_premium
+        -
+        trade["option_entry"]
+    )
+
+    trade["status"] = "CLOSED"
+
+    trade["exit_time"] = (
+        datetime.now()
+    )
+
+    st.session_state.closed_trades.append(
+        trade.copy()
+    )
+
+    st.session_state.running_trade = None
+
+
+# ============================================================
+# UPDATE LIVE TRADE
 # ============================================================
 
 def update_running_trade(
@@ -1121,7 +1133,9 @@ def update_running_trade(
     current_option_contract
 ):
 
-    trade = st.session_state.running_trade
+    trade = (
+        st.session_state.running_trade
+    )
 
     if trade is None:
         return
@@ -1129,90 +1143,115 @@ def update_running_trade(
     if current_option_contract is None:
         return
 
-    current_option_premium = (
+    premium = (
         current_option_contract["premium"]
     )
 
-    trade["last_premium"] = (
-        current_option_premium
-    )
-
-    # --------------------------------------------------------
-    # OPTION PROFIT / LOSS
-    # --------------------------------------------------------
+    trade["last_premium"] = premium
 
     trade["points"] = (
-        current_option_premium -
+        premium
+        -
         trade["option_entry"]
     )
 
-    # --------------------------------------------------------
-    # TARGET 1 HIT
-    #
-    # IMPORTANT:
-    #
-    # When 1:1 achieved:
-    #
-    # Trailing SL -> Entry Price
-    # --------------------------------------------------------
+    # ========================================================
+    # UPDATE HIGHEST PREMIUM
+    # ========================================================
+
+    if premium > trade["highest_premium"]:
+
+        trade["highest_premium"] = premium
+
+    # ========================================================
+    # TARGET 1 = BREAKEVEN
+    # ========================================================
 
     if (
+
         not trade["target1_hit"]
-        and
-        current_option_premium >=
-        trade["option_target1"]
+
+        and premium
+        >= trade["option_target1"]
+
     ):
 
         trade["target1_hit"] = True
 
         trade["trailing_active"] = True
 
-        # BREAKEVEN STOP LOSS
-        trade["trailing_sl"] = (
-            trade["option_entry"]
-        )
-
+        # SL moves to entry
         trade["option_sl"] = (
             trade["option_entry"]
         )
 
-    # --------------------------------------------------------
-    # TARGET 2
-    # --------------------------------------------------------
+        trade["trailing_sl"] = (
+            trade["option_entry"]
+        )
 
-    if (
-        current_option_premium >=
-        trade["option_target2"]
-    ):
+    # ========================================================
+    # DYNAMIC TRAILING SL
+    #
+    # After 1:1:
+    # Every new premium high
+    # SL trails 10% below highest premium
+    # But never below Entry
+    # ========================================================
+
+    if trade["trailing_active"]:
+
+        highest = (
+            trade["highest_premium"]
+        )
+
+        trailing_percent = 0.10
+
+        new_trailing_sl = (
+            highest
+            * (1 - trailing_percent)
+        )
+
+        new_trailing_sl = max(
+            new_trailing_sl,
+            trade["option_entry"]
+        )
+
+        if new_trailing_sl > trade["option_sl"]:
+
+            trade["option_sl"] = (
+                new_trailing_sl
+            )
+
+            trade["trailing_sl"] = (
+                new_trailing_sl
+            )
+
+    # ========================================================
+    # TARGET 2
+    # ========================================================
+
+    if premium >= trade["option_target2"]:
 
         trade["exit_reason"] = (
             "OPTION TARGET 2 HIT"
         )
 
-        trade["exit_premium"] = (
-            current_option_premium
-        )
+        trade["exit_premium"] = premium
 
         close_running_trade()
 
         return
 
-    # --------------------------------------------------------
-    # OPTION STOP LOSS
-    #
-    # If Target 1 was achieved,
-    # this will now be Entry Price
-    # --------------------------------------------------------
+    # ========================================================
+    # OPTION TRAILING SL / SL
+    # ========================================================
 
-    if (
-        current_option_premium <=
-        trade["option_sl"]
-    ):
+    if premium <= trade["option_sl"]:
 
         if trade["trailing_active"]:
 
             trade["exit_reason"] = (
-                "TRAILING SL HIT - BREAKEVEN"
+                "TRAILING SL HIT"
             )
 
         else:
@@ -1221,93 +1260,75 @@ def update_running_trade(
                 "OPTION STOP LOSS HIT"
             )
 
-        trade["exit_premium"] = (
-            current_option_premium
-        )
+        trade["exit_premium"] = premium
 
         close_running_trade()
 
         return
 
-    # --------------------------------------------------------
-    # INDEX TARGET 2
-    # --------------------------------------------------------
+    # ========================================================
+    # INDEX STOP / TARGET
+    # ========================================================
 
     if trade["signal"] == "CALL":
 
         if (
-            current_index_price >=
-            trade["index_target2"]
-        ):
-
-            trade["exit_reason"] = (
-                "INDEX TARGET 2 HIT"
-            )
-
-            trade["exit_premium"] = (
-                current_option_premium
-            )
-
-            close_running_trade()
-
-            return
-
-    if trade["signal"] == "PUT":
-
-        if (
-            current_index_price <=
-            trade["index_target2"]
-        ):
-
-            trade["exit_reason"] = (
-                "INDEX TARGET 2 HIT"
-            )
-
-            trade["exit_premium"] = (
-                current_option_premium
-            )
-
-            close_running_trade()
-
-            return
-
-    # --------------------------------------------------------
-    # INDEX STOP LOSS
-    # --------------------------------------------------------
-
-    if trade["signal"] == "CALL":
-
-        if (
-            current_index_price <=
-            trade["index_sl"]
+            current_index_price
+            <= trade["index_sl"]
         ):
 
             trade["exit_reason"] = (
                 "INDEX STOP LOSS HIT"
             )
 
-            trade["exit_premium"] = (
-                current_option_premium
-            )
+            trade["exit_premium"] = premium
 
             close_running_trade()
 
             return
 
-    if trade["signal"] == "PUT":
+        if (
+            current_index_price
+            >= trade["index_target2"]
+        ):
+
+            trade["exit_reason"] = (
+                "INDEX TARGET 2 HIT"
+            )
+
+            trade["exit_premium"] = premium
+
+            close_running_trade()
+
+            return
+
+    elif trade["signal"] == "PUT":
 
         if (
-            current_index_price >=
-            trade["index_sl"]
+            current_index_price
+            >= trade["index_sl"]
         ):
 
             trade["exit_reason"] = (
                 "INDEX STOP LOSS HIT"
             )
 
-            trade["exit_premium"] = (
-                current_option_premium
+            trade["exit_premium"] = premium
+
+            close_running_trade()
+
+            return
+
+        if (
+            current_index_price
+            <= trade["index_target2"]
+        ):
+
+            trade["exit_reason"] = (
+                "INDEX TARGET 2 HIT"
             )
+
+            trade["exit_premium"] = premium
 
             close_running_trade()
 
@@ -1315,120 +1336,433 @@ def update_running_trade(
 
 
 # ============================================================
-# CLOSE TRADE
+# HISTORICAL BACKTEST
 # ============================================================
 
-def close_running_trade():
+def run_backtest(data):
 
-    trade = st.session_state.running_trade
+    trades = []
 
-    if trade is None:
-        return
+    position = None
 
-    exit_premium = (
-        trade.get("exit_premium")
-    )
+    for i in range(20, len(data)):
 
-    entry = trade["option_entry"]
+        current = data.iloc[i]
 
-    points = (
-        exit_premium -
-        entry
-    )
+        previous = data.iloc[i - 1]
 
-    trade["points"] = points
+        price = safe_float(
+            current["Close"]
+        )
 
-    trade["status"] = "CLOSED"
+        ema9 = safe_float(
+            current["EMA9"]
+        )
 
-    trade["exit_time"] = (
-        datetime.now()
-    )
+        ema15 = safe_float(
+            current["EMA15"]
+        )
 
-    closed_trade = trade.copy()
+        vwap = safe_float(
+            current["VWAP"]
+        )
 
-    st.session_state.closed_trades.append(
-        closed_trade
-    )
+        prev_ema9 = safe_float(
+            previous["EMA9"]
+        )
 
-    st.session_state.running_trade = None
+        prev_ema15 = safe_float(
+            previous["EMA15"]
+        )
 
+        bullish_trend = (
 
-# ============================================================
-# BACKTEST STATISTICS
-# ============================================================
+            price > ema9
 
-def get_backtest_stats():
+            and ema9 > ema15
 
-    trades = (
-        st.session_state.closed_trades
-    )
+            and price > vwap
+        )
 
-    if len(trades) == 0:
+        bearish_trend = (
 
-        return {
-            "closed": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": 0,
-            "net_points": 0,
-            "target1": 0,
-            "target2": 0
-        }
+            price < ema9
 
-    wins = len([
-        x for x in trades
-        if x.get("points", 0) > 0
-    ])
+            and ema9 < ema15
 
-    losses = len([
-        x for x in trades
-        if x.get("points", 0) < 0
-    ])
+            and price < vwap
+        )
 
-    breakeven = len([
-        x for x in trades
-        if abs(
-            x.get("points", 0)
-        ) < 0.01
-    ])
+        bullish_candle = (
+            current["Close"]
+            > current["Open"]
+        )
 
-    closed = len(trades)
+        bearish_candle = (
+            current["Close"]
+            < current["Open"]
+        )
 
-    net_points = sum(
-        x.get("points", 0)
-        for x in trades
-    )
+        bullish_cross = (
 
-    target1 = len([
-        x for x in trades
-        if x.get("target1_hit", False)
-    ])
+            prev_ema9
+            <= prev_ema15
 
-    target2 = len([
-        x for x in trades
-        if x.get("exit_reason") ==
-        "OPTION TARGET 2 HIT"
-    ])
+            and ema9 > ema15
+        )
 
-    win_rate = 0
+        bearish_cross = (
 
-    if closed > 0:
+            prev_ema9
+            >= prev_ema15
 
-        win_rate = (
-            wins /
-            closed
-        ) * 100
+            and ema9 < ema15
+        )
 
-    return {
-        "closed": closed,
-        "wins": wins,
-        "losses": losses,
-        "breakeven": breakeven,
-        "win_rate": win_rate,
-        "net_points": net_points,
-        "target1": target1,
-        "target2": target2
-    }
+        recent_high = (
+            data["High"]
+            .iloc[i - 5:i]
+            .max()
+        )
+
+        recent_low = (
+            data["Low"]
+            .iloc[i - 5:i]
+            .min()
+        )
+
+        bullish_breakout = (
+            price > recent_high
+        )
+
+        bearish_breakdown = (
+            price < recent_low
+        )
+
+        call_score = 0
+        put_score = 0
+
+        if bullish_trend:
+            call_score += 3
+
+        if bearish_trend:
+            put_score += 3
+
+        if bullish_candle:
+            call_score += 1
+
+        if bearish_candle:
+            put_score += 1
+
+        if bullish_cross:
+            call_score += 2
+
+        if bearish_cross:
+            put_score += 2
+
+        if bullish_breakout:
+            call_score += 2
+
+        if bearish_breakdown:
+            put_score += 2
+
+        # ====================================================
+        # NEW ENTRY
+        # ====================================================
+
+        if position is None:
+
+            candle_range = (
+                current["High"]
+                -
+                current["Low"]
+            )
+
+            risk = max(
+                8,
+                min(
+                    15,
+                    candle_range * 0.5
+                )
+            )
+
+            if call_score >= 5:
+
+                position = {
+
+                    "signal":
+                        "CALL",
+
+                    "entry_time":
+                        data.index[i],
+
+                    "entry":
+                        price,
+
+                    "sl":
+                        price - risk,
+
+                    "target1":
+                        price + risk,
+
+                    "target2":
+                        price + (
+                            risk * 2
+                        ),
+
+                    "risk":
+                        risk,
+
+                    "target1_hit":
+                        False,
+
+                    "highest_price":
+                        price
+                }
+
+            elif put_score >= 5:
+
+                position = {
+
+                    "signal":
+                        "PUT",
+
+                    "entry_time":
+                        data.index[i],
+
+                    "entry":
+                        price,
+
+                    "sl":
+                        price + risk,
+
+                    "target1":
+                        price - risk,
+
+                    "target2":
+                        price - (
+                            risk * 2
+                        ),
+
+                    "risk":
+                        risk,
+
+                    "target1_hit":
+                        False,
+
+                    "lowest_price":
+                        price
+                }
+
+        # ====================================================
+        # CALL MANAGEMENT
+        # ====================================================
+
+        elif position["signal"] == "CALL":
+
+            high = current["High"]
+            low = current["Low"]
+
+            if high > position["highest_price"]:
+
+                position["highest_price"] = high
+
+            # Target 1
+            if (
+
+                not position["target1_hit"]
+
+                and high
+                >= position["target1"]
+
+            ):
+
+                position["target1_hit"] = True
+
+                position["sl"] = (
+                    position["entry"]
+                )
+
+            # Dynamic trailing
+            if position["target1_hit"]:
+
+                trailing_sl = max(
+
+                    position["entry"],
+
+                    position["highest_price"]
+                    -
+                    position["risk"]
+                )
+
+                if trailing_sl > position["sl"]:
+
+                    position["sl"] = trailing_sl
+
+            # Target 2
+            if high >= position["target2"]:
+
+                position["exit"] = (
+                    position["target2"]
+                )
+
+                position["exit_reason"] = (
+                    "TARGET 2 HIT"
+                )
+
+                position["exit_time"] = (
+                    data.index[i]
+                )
+
+                position["points"] = (
+                    position["exit"]
+                    -
+                    position["entry"]
+                )
+
+                trades.append(
+                    position.copy()
+                )
+
+                position = None
+
+            # Stop loss
+            elif low <= position["sl"]:
+
+                position["exit"] = (
+                    position["sl"]
+                )
+
+                position["exit_reason"] = (
+
+                    "TRAILING SL HIT"
+
+                    if position["target1_hit"]
+
+                    else "STOP LOSS HIT"
+                )
+
+                position["exit_time"] = (
+                    data.index[i]
+                )
+
+                position["points"] = (
+                    position["exit"]
+                    -
+                    position["entry"]
+                )
+
+                trades.append(
+                    position.copy()
+                )
+
+                position = None
+
+        # ====================================================
+        # PUT MANAGEMENT
+        # ====================================================
+
+        elif position["signal"] == "PUT":
+
+            high = current["High"]
+            low = current["Low"]
+
+            if low < position["lowest_price"]:
+
+                position["lowest_price"] = low
+
+            # Target 1
+            if (
+
+                not position["target1_hit"]
+
+                and low
+                <= position["target1"]
+
+            ):
+
+                position["target1_hit"] = True
+
+                position["sl"] = (
+                    position["entry"]
+                )
+
+            # Dynamic trailing
+            if position["target1_hit"]:
+
+                trailing_sl = min(
+
+                    position["entry"],
+
+                    position["lowest_price"]
+                    +
+                    position["risk"]
+                )
+
+                if trailing_sl < position["sl"]:
+
+                    position["sl"] = trailing_sl
+
+            # Target 2
+            if low <= position["target2"]:
+
+                position["exit"] = (
+                    position["target2"]
+                )
+
+                position["exit_reason"] = (
+                    "TARGET 2 HIT"
+                )
+
+                position["exit_time"] = (
+                    data.index[i]
+                )
+
+                position["points"] = (
+                    position["entry"]
+                    -
+                    position["exit"]
+                )
+
+                trades.append(
+                    position.copy()
+                )
+
+                position = None
+
+            # Stop loss
+            elif high >= position["sl"]:
+
+                position["exit"] = (
+                    position["sl"]
+                )
+
+                position["exit_reason"] = (
+
+                    "TRAILING SL HIT"
+
+                    if position["target1_hit"]
+
+                    else "STOP LOSS HIT"
+                )
+
+                position["exit_time"] = (
+                    data.index[i]
+                )
+
+                position["points"] = (
+                    position["entry"]
+                    -
+                    position["exit"]
+                )
+
+                trades.append(
+                    position.copy()
+                )
+
+                position = None
+
+    return trades
 
 
 # ============================================================
@@ -1436,6 +1770,12 @@ def get_backtest_stats():
 # ============================================================
 
 st.title("📈 Personal Scalping Scanner")
+
+st.caption(
+    "EMA 9 + EMA 15 + VWAP | "
+    "ATM/ITM Options | "
+    "1:1 Breakeven + Dynamic Trailing SL"
+)
 
 
 # ============================================================
@@ -1448,8 +1788,7 @@ with col1:
 
     index_name = st.selectbox(
         "Select Index",
-        list(INDEX_CONFIG.keys()),
-        index=0
+        list(INDEX_CONFIG.keys())
     )
 
 with col2:
@@ -1462,18 +1801,17 @@ with col2:
 
 
 # ============================================================
-# GET MARKET DATA
+# MARKET DATA
 # ============================================================
 
-symbol = INDEX_CONFIG[
-    index_name
-]["yahoo"]
+symbol = (
+    INDEX_CONFIG[index_name]["yahoo"]
+)
 
 df = get_market_data(
     symbol,
     timeframe
 )
-
 
 if df.empty:
 
@@ -1485,7 +1823,7 @@ if df.empty:
 
 
 # ============================================================
-# CALCULATE INDICATORS
+# INDICATORS
 # ============================================================
 
 data = calculate_indicators(df)
@@ -1495,7 +1833,7 @@ signal_data = get_signal(data)
 if signal_data is None:
 
     st.warning(
-        "Signal calculate करने के लिए पर्याप्त data नहीं है।"
+        "Signal के लिए पर्याप्त data नहीं है।"
     )
 
     st.stop()
@@ -1505,96 +1843,82 @@ signal = signal_data["signal"]
 
 price = signal_data["price"]
 
-ema9 = signal_data["ema9"]
-
-ema15 = signal_data["ema15"]
-
-vwap = signal_data["vwap"]
-
 
 # ============================================================
 # INDEX LEVELS
 # ============================================================
 
-index_levels = (
-    calculate_index_levels(
-        signal_data,
-        data
-    )
+index_levels = calculate_index_levels(
+    signal_data,
+    data
 )
 
 
 # ============================================================
-# GET OPTION CONTRACT
+# OPTION CONTRACT
 # ============================================================
 
 option_contract = None
 option_levels = None
 
-if signal == "CALL":
+if signal in ["CALL", "PUT"]:
+
+    option_type = (
+        "CE"
+        if signal == "CALL"
+        else "PE"
+    )
 
     option_chain = get_option_chain(
         index_name
     )
 
-    option_contract = (
-        find_option_contract(
-            option_chain,
-            price,
-            "CE",
-            index_name
-        )
-    )
+    option_contract = find_option_contract(
 
-elif signal == "PUT":
+        option_chain,
 
-    option_chain = get_option_chain(
+        price,
+
+        option_type,
+
         index_name
     )
 
-    option_contract = (
-        find_option_contract(
-            option_chain,
-            price,
-            "PE",
-            index_name
-        )
-    )
+    if option_contract:
 
-if option_contract is not None:
-
-    option_levels = (
-        calculate_option_levels(
-            option_contract["premium"]
+        option_levels = (
+            calculate_option_levels(
+                option_contract["premium"]
+            )
         )
-    )
 
 
 # ============================================================
 # UPDATE RUNNING TRADE
 # ============================================================
 
-if st.session_state.running_trade is not None:
+if st.session_state.running_trade:
 
     running = (
         st.session_state.running_trade
     )
 
-    current_type = (
-        running["option_type"]
+    option_chain_live = (
+        get_option_chain(index_name)
     )
 
-    option_chain_live = get_option_chain(
-        index_name
-    )
+    current_option = find_option_contract(
 
-    current_option = (
-        find_option_contract(
-            option_chain_live,
-            price,
-            current_type,
-            index_name
-        )
+        option_chain_live,
+
+        price,
+
+        running["option_type"],
+
+        index_name,
+
+        locked_strike=
+            running["option_strike"]
     )
 
     update_running_trade(
@@ -1608,56 +1932,62 @@ if st.session_state.running_trade is not None:
 # ============================================================
 
 if (
-    signal in ["CALL", "PUT"]
-    and
-    st.session_state.running_trade is None
-    and
-    option_contract is not None
-    and
-    option_levels is not None
-):
 
-    last_signal = (
-        st.session_state.last_signal
-    )
+    signal in ["CALL", "PUT"]
+
+    and st.session_state.running_trade is None
+
+    and option_contract is not None
+
+    and option_levels is not None
+
+):
 
     signal_time = str(
         signal_data["time"]
     )
 
-    # New trade only if signal changes
     if (
-        last_signal != signal
+
+        st.session_state.last_signal
+        != signal
+
         or
+
         st.session_state.last_trade_signal_time
         != signal_time
+
     ):
 
         new_trade = create_trade(
+
             signal_data,
+
             index_levels,
+
             option_contract,
+
             option_levels
         )
 
-        if new_trade is not None:
+        st.session_state.running_trade = (
+            new_trade
+        )
 
-            st.session_state.running_trade = (
-                new_trade
-            )
+        st.session_state.last_signal = (
+            signal
+        )
 
-            st.session_state.last_signal = (
-                signal
-            )
-
-            st.session_state.last_trade_signal_time = (
-                signal_time
-            )
+        st.session_state.last_trade_signal_time = (
+            signal_time
+        )
 
 
 # ============================================================
-# SIGNAL COLOR
+# CURRENT SIGNAL
 # ============================================================
+
+st.markdown("### Current Signal")
 
 if signal == "CALL":
 
@@ -1671,12 +2001,6 @@ else:
 
     signal_class = "signal-wait"
 
-
-# ============================================================
-# TOP METRICS
-# ============================================================
-
-st.markdown("### Current Signal")
 
 m1, m2 = st.columns(2)
 
@@ -1693,24 +2017,27 @@ with m1:
 
 with m2:
 
-    trade_status = (
+    status = (
+
         "RUNNING"
+
         if st.session_state.running_trade
+
         else "WAIT"
     )
 
     st.markdown(
         metric_box(
             "Trade Status",
-            trade_status
+            status
         ),
         unsafe_allow_html=True
     )
 
 
-c1, c2 = st.columns(2)
+m1, m2 = st.columns(2)
 
-with c1:
+with m1:
 
     st.markdown(
         metric_box(
@@ -1720,113 +2047,41 @@ with c1:
         unsafe_allow_html=True
     )
 
-with c2:
+with m2:
 
     st.markdown(
         metric_box(
             "EMA 9",
-            format_number(ema9)
+            format_number(
+                signal_data["ema9"]
+            )
         ),
         unsafe_allow_html=True
     )
 
 
-c1, c2 = st.columns(2)
+m1, m2 = st.columns(2)
 
-with c1:
+with m1:
 
     st.markdown(
         metric_box(
             "EMA 15",
-            format_number(ema15)
+            format_number(
+                signal_data["ema15"]
+            )
         ),
         unsafe_allow_html=True
     )
 
-with c2:
+with m2:
 
     st.markdown(
         metric_box(
-            "VWAP (OHLC/4)",
-            format_number(vwap)
-        ),
-        unsafe_allow_html=True
-    )
-
-
-c1, c2 = st.columns(2)
-
-with c1:
-
-    index_sl_text = (
-        format_number(
-            index_levels["stop_loss"]
-        )
-        if index_levels["stop_loss"]
-        else "-"
-    )
-
-    st.markdown(
-        metric_box(
-            "Index Stop Loss",
-            index_sl_text
-        ),
-        unsafe_allow_html=True
-    )
-
-with c2:
-
-    risk_text = (
-        format_number(
-            index_levels["risk"]
-        )
-        if index_levels["risk"]
-        else "-"
-    )
-
-    st.markdown(
-        metric_box(
-            "Risk Points",
-            risk_text
-        ),
-        unsafe_allow_html=True
-    )
-
-
-c1, c2 = st.columns(2)
-
-with c1:
-
-    target1_text = (
-        format_number(
-            index_levels["target1"]
-        )
-        if index_levels["target1"]
-        else "-"
-    )
-
-    st.markdown(
-        metric_box(
-            "Target 1 (1:1)",
-            target1_text
-        ),
-        unsafe_allow_html=True
-    )
-
-with c2:
-
-    target2_text = (
-        format_number(
-            index_levels["target2"]
-        )
-        if index_levels["target2"]
-        else "-"
-    )
-
-    st.markdown(
-        metric_box(
-            "Target 2 (1:2)",
-            target2_text
+            "VWAP",
+            format_number(
+                signal_data["vwap"]
+            )
         ),
         unsafe_allow_html=True
     )
@@ -1842,18 +2097,24 @@ st.markdown(
 )
 
 st.caption(
-    f"CALL Score: {signal_data['call_score']} | "
-    f"PUT Score: {signal_data['put_score']}"
+
+    f"CALL Score: "
+    f"{signal_data['call_score']} | "
+
+    f"PUT Score: "
+    f"{signal_data['put_score']}"
 )
 
 
 # ============================================================
-# OPTION PREMIUM DETAILS
+# OPTION PREMIUM
 # ============================================================
 
-st.markdown("### 🎯 Live Option Premium")
+st.markdown(
+    "### 🎯 Live Option Premium"
+)
 
-if option_contract is not None:
+if option_contract:
 
     o1, o2 = st.columns(2)
 
@@ -1906,7 +2167,7 @@ if option_contract is not None:
         )
 
 
-    if option_levels is not None:
+    if option_levels:
 
         o1, o2 = st.columns(2)
 
@@ -1914,7 +2175,7 @@ if option_contract is not None:
 
             st.markdown(
                 metric_box(
-                    "Option Premium SL",
+                    "Option SL",
                     format_number(
                         option_levels["sl"]
                     )
@@ -1926,7 +2187,7 @@ if option_contract is not None:
 
             st.markdown(
                 metric_box(
-                    "Option Premium Target 1",
+                    "Target 1 (1:1)",
                     format_number(
                         option_levels["target1"]
                     )
@@ -1941,7 +2202,7 @@ if option_contract is not None:
 
             st.markdown(
                 metric_box(
-                    "Option Premium Target 2",
+                    "Target 2 (1:2)",
                     format_number(
                         option_levels["target2"]
                     )
@@ -1954,7 +2215,7 @@ if option_contract is not None:
             st.markdown(
                 metric_box(
                     "Trailing Rule",
-                    "1:1 → SL = Entry Price"
+                    "After 1:1 → Dynamic SL"
                 ),
                 unsafe_allow_html=True
             )
@@ -1962,7 +2223,7 @@ if option_contract is not None:
 else:
 
     st.warning(
-        "NSE option-chain से option premium अभी उपलब्ध नहीं है।"
+        "NSE option-chain से option premium उपलब्ध नहीं है।"
     )
 
 
@@ -1972,75 +2233,72 @@ else:
 
 st.markdown("### 📊 Index Chart")
 
-chart_data = data.tail(150).copy()
+chart_data = (
+    data.tail(150).copy()
+)
 
 fig = go.Figure()
 
 
-# ------------------------------------------------------------
-# CANDLESTICK
-# ------------------------------------------------------------
-
 fig.add_trace(
     go.Candlestick(
+
         x=chart_data.index,
+
         open=chart_data["Open"],
+
         high=chart_data["High"],
+
         low=chart_data["Low"],
+
         close=chart_data["Close"],
+
         name="Price"
     )
 )
 
 
-# ------------------------------------------------------------
-# EMA 9
-# ------------------------------------------------------------
-
 fig.add_trace(
     go.Scatter(
+
         x=chart_data.index,
+
         y=chart_data["EMA9"],
+
         mode="lines",
-        name="EMA 9",
-        line=dict(width=1.5)
+
+        name="EMA 9"
     )
 )
 
 
-# ------------------------------------------------------------
-# EMA 15
-# ------------------------------------------------------------
-
 fig.add_trace(
     go.Scatter(
+
         x=chart_data.index,
+
         y=chart_data["EMA15"],
+
         mode="lines",
-        name="EMA 15",
-        line=dict(width=1.5)
+
+        name="EMA 15"
     )
 )
 
-
-# ------------------------------------------------------------
-# VWAP
-# ------------------------------------------------------------
 
 fig.add_trace(
     go.Scatter(
+
         x=chart_data.index,
+
         y=chart_data["VWAP"],
+
         mode="lines",
-        name="VWAP",
-        line=dict(width=1.5)
+
+        name="VWAP"
     )
 )
 
-
-# ============================================================
-# CHART LINES
-# ============================================================
 
 if signal in ["CALL", "PUT"]:
 
@@ -2049,117 +2307,97 @@ if signal in ["CALL", "PUT"]:
     t1 = index_levels["target1"]
     t2 = index_levels["target2"]
 
-    # ENTRY
     fig.add_hline(
+
         y=entry,
+
         line_dash="dot",
-        annotation_text=f"{signal} ENTRY {entry:.2f}"
+
+        annotation_text=(
+            f"{signal} ENTRY "
+            f"{entry:.2f}"
+        )
     )
 
-    # STOP LOSS
     fig.add_hline(
+
         y=sl,
+
         line_dash="dash",
-        annotation_text=f"SL {sl:.2f}"
+
+        annotation_text=(
+            f"SL {sl:.2f}"
+        )
     )
 
-    # TARGET 1
     fig.add_hline(
+
         y=t1,
-        line_dash="dash",
-        annotation_text=f"T1 {t1:.2f}"
+
+        line_dash="dot",
+
+        annotation_text=(
+            f"T1 {t1:.2f}"
+        )
     )
 
-    # TARGET 2
     fig.add_hline(
+
         y=t2,
+
         line_dash="dash",
-        annotation_text=f"T2 {t2:.2f}"
+
+        annotation_text=(
+            f"T2 {t2:.2f}"
+        )
     )
 
-    # --------------------------------------------------------
-    # ENTRY ARROW
-    # --------------------------------------------------------
+    arrow = (
 
-    arrow_symbol = (
         "triangle-up"
+
         if signal == "CALL"
+
         else "triangle-down"
     )
 
     fig.add_trace(
+
         go.Scatter(
-            x=[chart_data.index[-1]],
-            y=[entry],
+
+            x=[
+                chart_data.index[-1]
+            ],
+
+            y=[
+                entry
+            ],
+
             mode="markers+text",
+
             marker=dict(
                 size=16,
-                symbol=arrow_symbol
+                symbol=arrow
             ),
-            text=[signal],
+
+            text=[
+                signal
+            ],
+
             textposition="top center",
+
             name=f"{signal} ENTRY"
         )
     )
 
 
-# ============================================================
-# RUNNING TRADE LEVELS ON CHART
-# ============================================================
-
-running = (
-    st.session_state.running_trade
-)
-
-if running is not None:
-
-    fig.add_hline(
-        y=running["index_entry"],
-        line_dash="dot",
-        annotation_text=(
-            f"RUNNING {running['signal']} "
-            f"ENTRY"
-        )
-    )
-
-    fig.add_hline(
-        y=running["index_sl"],
-        line_dash="dash",
-        annotation_text="INDEX SL"
-    )
-
-    if running["signal"] == "CALL":
-
-        fig.add_hline(
-            y=running["index_target1"],
-            line_dash="dot",
-            annotation_text="INDEX T1"
-        )
-
-        fig.add_hline(
-            y=running["index_target2"],
-            line_dash="dash",
-            annotation_text="INDEX T2"
-        )
-
-    else:
-
-        fig.add_hline(
-            y=running["index_target1"],
-            line_dash="dot",
-            annotation_text="INDEX T1"
-        )
-
-        fig.add_hline(
-            y=running["index_target2"],
-            line_dash="dash",
-            annotation_text="INDEX T2"
-        )
-
-
 fig.update_layout(
 
     height=620,
+
+    template="plotly_dark",
+
+    xaxis_rangeslider_visible=False,
 
     margin=dict(
         l=10,
@@ -2168,14 +2406,9 @@ fig.update_layout(
         b=10
     ),
 
-    xaxis_rangeslider_visible=False,
-
-    template="plotly_dark",
-
     legend=dict(
         orientation="h"
     )
-
 )
 
 
@@ -2189,7 +2422,9 @@ st.plotly_chart(
 # RUNNING TRADE
 # ============================================================
 
-st.markdown("### 🔵 Running Trade")
+st.markdown(
+    "### 🔵 Running Trade"
+)
 
 running = (
     st.session_state.running_trade
@@ -2225,7 +2460,7 @@ else:
 
         st.markdown(
             metric_box(
-                "Option Entry Premium",
+                "Entry Premium",
                 format_number(
                     running["option_entry"]
                 )
@@ -2257,6 +2492,16 @@ else:
 
         st.markdown(
             metric_box(
+                "Highest Premium",
+                format_number(
+                    running["highest_premium"]
+                )
+            ),
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            metric_box(
                 "Target 1",
                 format_number(
                     running["option_target1"]
@@ -2275,122 +2520,212 @@ else:
             unsafe_allow_html=True
         )
 
-        trailing_text = (
-            "ACTIVE → SL = ENTRY PRICE"
-            if running["trailing_active"]
-            else "Waiting for 1:1"
-        )
-
-        st.markdown(
-            metric_box(
-                "Trailing Stop Loss",
-                trailing_text
-            ),
-            unsafe_allow_html=True
-        )
-
-
     if running["target1_hit"]:
 
         st.success(
-            "✅ Target 1 / 1:1 achieved — "
-            "Stop Loss अब Entry Price पर है "
-            "(Breakeven Trailing SL)."
+            "✅ 1:1 achieved. "
+            "SL Entry पर गया और अब "
+            "highest premium के साथ trail हो रहा है।"
         )
 
     else:
 
         st.warning(
-            "⏳ 1:1 का इंतजार — "
-            "Target 1 hit होते ही "
-            "SL Entry Price पर shift होगा।"
+            "⏳ Target 1 hit होने पर "
+            "SL पहले Entry Price पर जाएगा।"
         )
 
 
 # ============================================================
-# BACKTEST
+# HISTORICAL BACKTEST
 # ============================================================
 
 st.markdown(
-    "### 📉 Backtest (Closed Trades Only)"
+    "### 📉 Historical Backtest"
 )
 
-stats = get_backtest_stats()
+backtest_trades = (
+    run_backtest(data)
+)
 
-b1, b2 = st.columns(2)
+total = len(
+    backtest_trades
+)
+
+wins = len([
+
+    x for x in backtest_trades
+
+    if x["points"] > 0
+])
+
+losses = len([
+
+    x for x in backtest_trades
+
+    if x["points"] < 0
+])
+
+breakeven = len([
+
+    x for x in backtest_trades
+
+    if abs(x["points"]) < 0.01
+])
+
+win_rate = (
+
+    wins / total * 100
+
+    if total > 0
+
+    else 0
+)
+
+net_points = sum(
+
+    x["points"]
+
+    for x in backtest_trades
+)
+
+
+b1, b2, b3, b4 = st.columns(4)
 
 with b1:
 
-    st.markdown(
-        metric_box(
-            "Closed Trades",
-            stats["closed"]
-        ),
-        unsafe_allow_html=True
+    st.metric(
+        "Total Trades",
+        total
     )
 
 with b2:
 
-    st.markdown(
-        metric_box(
-            "Wins",
-            stats["wins"]
-        ),
-        unsafe_allow_html=True
+    st.metric(
+        "Wins",
+        wins
+    )
+
+with b3:
+
+    st.metric(
+        "Losses",
+        losses
+    )
+
+with b4:
+
+    st.metric(
+        "Win Rate",
+        f"{win_rate:.1f}%"
     )
 
 
-b1, b2 = st.columns(2)
+b1, b2, b3 = st.columns(3)
 
 with b1:
 
-    st.markdown(
-        metric_box(
-            "Losses",
-            stats["losses"]
-        ),
-        unsafe_allow_html=True
+    st.metric(
+        "Breakeven",
+        breakeven
     )
 
 with b2:
 
-    st.markdown(
-        metric_box(
-            "Win Rate",
-            f"{stats['win_rate']:.1f}%"
-        ),
-        unsafe_allow_html=True
+    st.metric(
+        "Net Points",
+        f"{net_points:.2f}"
     )
 
+with b3:
 
-b1, b2 = st.columns(2)
-
-with b1:
-
-    st.markdown(
-        metric_box(
-            "Net Premium Points",
-            f"{stats['net_points']:.2f}"
-        ),
-        unsafe_allow_html=True
-    )
-
-with b2:
-
-    st.markdown(
-        metric_box(
-            "Target 1 / Target 2",
-            f"{stats['target1']} / {stats['target2']}"
-        ),
-        unsafe_allow_html=True
+    st.metric(
+        "Backtest Candles",
+        len(data)
     )
 
 
 # ============================================================
-# RECENT CLOSED TRADES
+# BACKTEST TABLE
 # ============================================================
 
-st.markdown("### Recent Closed Trades")
+st.markdown(
+    "### Recent Backtest Trades"
+)
+
+if len(backtest_trades) == 0:
+
+    st.info(
+        "इस timeframe के available data में "
+        "कोई completed trade नहीं मिला।"
+    )
+
+else:
+
+    rows = []
+
+    for trade in reversed(
+        backtest_trades[-20:]
+    ):
+
+        rows.append({
+
+            "Signal":
+                trade["signal"],
+
+            "Entry Time":
+                str(
+                    trade["entry_time"]
+                ),
+
+            "Entry":
+                round(
+                    trade["entry"],
+                    2
+                ),
+
+            "Exit":
+                round(
+                    trade["exit"],
+                    2
+                ),
+
+            "Points":
+                round(
+                    trade["points"],
+                    2
+                ),
+
+            "T1 Hit":
+                (
+                    "YES"
+
+                    if trade["target1_hit"]
+
+                    else "NO"
+                ),
+
+            "Exit Reason":
+                trade["exit_reason"]
+        })
+
+    backtest_df = pd.DataFrame(
+        rows
+    )
+
+    st.dataframe(
+        backtest_df,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# LIVE CLOSED TRADES
+# ============================================================
+
+st.markdown(
+    "### Recent Live Closed Trades"
+)
 
 closed_trades = (
     st.session_state.closed_trades
@@ -2399,7 +2734,7 @@ closed_trades = (
 if len(closed_trades) == 0:
 
     st.info(
-        "No closed trades found."
+        "No live closed trades yet."
     )
 
 else:
@@ -2436,33 +2771,30 @@ else:
                     2
                 ),
 
-            "Target 1":
-                "YES"
-                if trade["target1_hit"]
-                else "NO",
+            "T1 Hit":
+                (
+                    "YES"
+
+                    if trade["target1_hit"]
+
+                    else "NO"
+                ),
 
             "Exit Reason":
                 trade["exit_reason"]
         })
 
-    trades_df = pd.DataFrame(
-        rows
-    )
-
     st.dataframe(
-        trades_df,
+        pd.DataFrame(rows),
         use_container_width=True
     )
 
 
 # ============================================================
-# MANUAL CLOSE BUTTON
+# MANUAL CLOSE
 # ============================================================
 
-if (
-    st.session_state.running_trade
-    is not None
-):
+if st.session_state.running_trade:
 
     if st.button(
         "🔴 Close Running Trade"
@@ -2486,12 +2818,25 @@ if (
 
 
 # ============================================================
+# REFRESH
+# ============================================================
+
+if st.button(
+    "🔄 Refresh Market Data"
+):
+
+    st.cache_data.clear()
+
+    st.rerun()
+
+
+# ============================================================
 # FOOTER
 # ============================================================
 
 st.caption(
-    "Scalping scanner | "
     "EMA 9 + EMA 15 + VWAP | "
     "ATM/ITM Options Only | "
-    "1:1 → Breakeven Trailing SL"
+    "1:1 → Breakeven SL → "
+    "Dynamic Trailing SL"
 )
