@@ -20,58 +20,91 @@ st.set_page_config(
 # CUSTOM CSS
 # ============================================================
 
-st.markdown("""
-<style>
+st.markdown(
+    """
+    <style>
 
-.stApp {
-    background-color: #0e1420;
-    color: #d8dee9;
-}
+    .stApp {
+        background-color: #0e1420;
+        color: #d8dee9;
+    }
 
-.main {
-    background-color: #0e1420;
-}
+    .main {
+        background-color: #0e1420;
+    }
 
-h1, h2, h3 {
-    color: #d8dee9;
-}
+    h1, h2, h3 {
+        color: #d8dee9;
+    }
 
-.metric-box {
-    background: #1b2b3e;
-    border: 1px solid #263b52;
-    border-radius: 8px;
-    padding: 15px;
-    margin-bottom: 10px;
-}
+    .metric-box {
+        background-color: #1b2b3e;
+        border: 1px solid #263b52;
+        border-radius: 10px;
+        padding: 18px;
+        min-height: 115px;
+        text-align: center;
+        margin-bottom: 10px;
+    }
 
-.metric-label {
-    font-size: 13px;
-    color: #aeb8c5;
-}
+    .metric-label {
+        font-size: 14px;
+        color: #aeb8c5;
+        margin-bottom: 12px;
+    }
 
-.metric-value {
-    font-size: 24px;
-    font-weight: bold;
-    margin-top: 8px;
-}
+    .metric-value {
+        font-size: 25px;
+        font-weight: 700;
+    }
 
-.info-box {
-    background: #1d344b;
-    border-radius: 6px;
-    padding: 14px;
-    color: #b7d8f5;
-    margin-bottom: 15px;
-}
+    .signal-buy {
+        color: #38d996;
+    }
 
-.rule-box {
-    background: #151d29;
-    border: 1px solid #293545;
-    border-radius: 8px;
-    padding: 14px;
-}
+    .signal-sell {
+        color: #ff6464;
+    }
 
-</style>
-""", unsafe_allow_html=True)
+    .signal-wait {
+        color: #ffd166;
+    }
+
+    .info-box {
+        background-color: #1d344b;
+        border-radius: 8px;
+        padding: 14px;
+        color: #b7d8f5;
+        margin-bottom: 15px;
+    }
+
+    .success-box {
+        background-color: #173b32;
+        border-radius: 8px;
+        padding: 14px;
+        color: #a7e6c5;
+        margin-bottom: 15px;
+    }
+
+    .warning-box {
+        background-color: #40371d;
+        border-radius: 8px;
+        padding: 14px;
+        color: #ffe5a0;
+        margin-bottom: 15px;
+    }
+
+    .rule-box {
+        background-color: #151d29;
+        border: 1px solid #293545;
+        border-radius: 8px;
+        padding: 16px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 
 # ============================================================
@@ -93,8 +126,13 @@ TIMEFRAME_MAP = {
 }
 
 
+MIN_STOP_LOSS = 10.0
+MAX_STOP_LOSS = 15.0
+RISK_REWARD = 2.0
+
+
 # ============================================================
-# DATA FUNCTIONS
+# DATA DOWNLOAD
 # ============================================================
 
 @st.cache_data(ttl=60)
@@ -107,7 +145,8 @@ def load_data(symbol, interval, period):
             interval=interval,
             period=period,
             progress=False,
-            auto_adjust=False
+            auto_adjust=False,
+            threads=False
         )
 
         if df.empty:
@@ -126,10 +165,12 @@ def load_data(symbol, interval, period):
             "Close"
         ]
 
-        for col in required_columns:
-            if col not in df.columns:
+        for column in required_columns:
+
+            if column not in df.columns:
                 return pd.DataFrame()
 
+        # Volume handling
         if "Volume" not in df.columns:
             df["Volume"] = 1
 
@@ -141,6 +182,13 @@ def load_data(symbol, interval, period):
                 "Close"
             ]
         )
+
+        df["Volume"] = pd.to_numeric(
+            df["Volume"],
+            errors="coerce"
+        )
+
+        df["Volume"] = df["Volume"].fillna(0)
 
         return df
 
@@ -185,19 +233,19 @@ def add_indicators(df):
     # --------------------------------------------------------
     # VWAP
     #
-    # Strategy Formula:
+    # Strategy formula:
     # (Open + High + Low + Close) / 4
     # --------------------------------------------------------
 
     df["TP"] = (
-        df["Open"] +
-        df["High"] +
-        df["Low"] +
-        df["Close"]
+        df["Open"]
+        + df["High"]
+        + df["Low"]
+        + df["Close"]
     ) / 4
 
     # --------------------------------------------------------
-    # VOLUME CLEANUP
+    # Ensure valid volume
     # --------------------------------------------------------
 
     df["Volume"] = pd.to_numeric(
@@ -205,30 +253,32 @@ def add_indicators(df):
         errors="coerce"
     ).fillna(0)
 
+    # For index data where volume may be zero
     df.loc[
         df["Volume"] <= 0,
         "Volume"
     ] = 1
 
     # --------------------------------------------------------
-    # SESSION
+    # SESSION VWAP
     # --------------------------------------------------------
 
-    if isinstance(
-        df.index,
-        pd.DatetimeIndex
-    ):
-        df["Session"] = df.index.date
+    if isinstance(df.index, pd.DatetimeIndex):
+
+        session_values = pd.Series(
+            df.index.date,
+            index=df.index
+        )
+
+        df["Session"] = session_values
+
     else:
+
         df["Session"] = 0
 
-    # --------------------------------------------------------
-    # VWAP CALCULATION
-    # --------------------------------------------------------
-
     df["PV"] = (
-        df["TP"] *
-        df["Volume"]
+        df["TP"]
+        * df["Volume"]
     )
 
     df["CumPV"] = (
@@ -242,22 +292,42 @@ def add_indicators(df):
     )
 
     df["VWAP"] = (
-        df["CumPV"] /
-        df["CumVolume"]
+        df["CumPV"]
+        / df["CumVolume"]
     )
 
     # --------------------------------------------------------
-    # EMA SLOPES
+    # EMA SLOPE
     # --------------------------------------------------------
 
     df["EMA9_Slope"] = (
-        df["EMA9"] -
-        df["EMA9"].shift(3)
+        df["EMA9"]
+        - df["EMA9"].shift(3)
     )
 
     df["EMA15_Slope"] = (
-        df["EMA15"] -
-        df["EMA15"].shift(3)
+        df["EMA15"]
+        - df["EMA15"].shift(3)
+    )
+
+    # --------------------------------------------------------
+    # TREND
+    # --------------------------------------------------------
+
+    df["BullTrend"] = (
+        (df["Close"] > df["VWAP"])
+        &
+        (df["EMA9"] > df["EMA15"])
+        &
+        (df["EMA9_Slope"] > 0)
+    )
+
+    df["BearTrend"] = (
+        (df["Close"] < df["VWAP"])
+        &
+        (df["EMA9"] < df["EMA15"])
+        &
+        (df["EMA9_Slope"] < 0)
     )
 
     return df
@@ -269,14 +339,33 @@ def add_indicators(df):
 
 def vwap_distance_percent(price, vwap):
 
-    if pd.isna(vwap) or vwap == 0:
-        return 999.0
+    if pd.isna(vwap):
+        return 999
 
-    return abs(price - vwap) / vwap * 100
+    if vwap == 0:
+        return 999
+
+    return (
+        abs(price - vwap)
+        / vwap
+        * 100
+    )
 
 
 # ============================================================
-# SIGNAL FUNCTION
+# STOP LOSS VALIDATION
+# ============================================================
+
+def valid_stop_loss(risk):
+
+    return (
+        risk >= MIN_STOP_LOSS
+        and risk <= MAX_STOP_LOSS
+    )
+
+
+# ============================================================
+# LIVE SIGNAL
 # ============================================================
 
 def get_signal(df):
@@ -286,10 +375,11 @@ def get_signal(df):
         return {
             "signal": "WAIT",
             "status": "NO DATA",
-            "reason": "Not enough candles",
+            "reason": "Not enough candles available.",
             "entry": None,
             "sl": None,
             "target": None,
+            "risk": None,
             "vwap_near": False
         }
 
@@ -297,86 +387,120 @@ def get_signal(df):
     prev = df.iloc[-2]
 
     close = float(last["Close"])
+
     ema9 = float(last["EMA9"])
     ema15 = float(last["EMA15"])
     vwap = float(last["VWAP"])
-
-    # --------------------------------------------------------
-    # VWAP DISTANCE
-    # --------------------------------------------------------
-
-    distance = vwap_distance_percent(
-        close,
-        vwap
-    )
-
-    vwap_near = distance <= 0.80
 
     # ========================================================
     # BUY CONDITIONS
     # ========================================================
 
     bull_trend = (
-        close > vwap and
-        ema9 > ema15 and
-        last["EMA9_Slope"] > 0
+        close > vwap
+        and ema9 > ema15
+        and last["EMA9_Slope"] > 0
     )
 
+    # Previous candle pulled back to EMA zone
     buy_pullback = (
-        prev["Low"] <= max(
+
+        prev["Low"]
+        <= max(
             prev["EMA9"],
             prev["EMA15"]
         )
+
         and
-        prev["Close"] >= prev["EMA15"]
+
+        prev["Close"]
+        >= prev["EMA15"]
     )
 
+    # Bullish confirmation
     bullish_confirmation = (
-        last["Close"] > last["Open"]
+
+        last["Close"]
+        > last["Open"]
+
         and
-        last["Close"] > last["EMA9"]
+
+        last["Close"]
+        > last["EMA9"]
     )
 
+    # Previous candle high breakout
     buy_breakout = (
-        last["Close"] > prev["High"]
+
+        last["Close"]
+        > prev["High"]
+    )
+
+    buy_vwap_distance = (
+        vwap_distance_percent(
+            close,
+            vwap
+        )
+    )
+
+    vwap_near_buy = (
+        buy_vwap_distance
+        <= 0.80
     )
 
     if (
+
         bull_trend
         and buy_pullback
         and bullish_confirmation
         and buy_breakout
+
     ):
 
         entry = close
 
-        sl = min(
+        raw_sl = min(
             float(prev["Low"]),
             float(last["Low"])
         )
 
-        risk = entry - sl
+        risk = entry - raw_sl
 
-        if risk > 0:
+        # ----------------------------------------------------
+        # ONLY 10 TO 15 POINT STOP LOSS
+        # ----------------------------------------------------
 
-            target = entry + (
-                risk * 2
+        if valid_stop_loss(risk):
+
+            target = (
+                entry
+                + risk * RISK_REWARD
             )
 
             return {
+
                 "signal": "BUY",
+
                 "status": "SETUP READY",
+
                 "reason": (
                     "Price above VWAP + "
                     "EMA9 above EMA15 + "
-                    "EMA pullback + "
+                    "EMA slope upward + "
+                    "clean EMA pullback + "
                     "bullish confirmation + "
                     "previous candle high breakout"
                 ),
+
                 "entry": entry,
-                "sl": sl,
+
+                "sl": raw_sl,
+
                 "target": target,
-                "vwap_near": vwap_near
+
+                "risk": risk,
+
+                "vwap_near": vwap_near_buy
             }
 
     # ========================================================
@@ -384,66 +508,110 @@ def get_signal(df):
     # ========================================================
 
     bear_trend = (
-        close < vwap and
-        ema9 < ema15 and
-        last["EMA9_Slope"] < 0
+        close < vwap
+        and ema9 < ema15
+        and last["EMA9_Slope"] < 0
     )
 
+    # Previous candle pulled back to EMA zone
     sell_pullback = (
-        prev["High"] >= min(
+
+        prev["High"]
+        >= min(
             prev["EMA9"],
             prev["EMA15"]
         )
+
         and
-        prev["Close"] <= prev["EMA15"]
+
+        prev["Close"]
+        <= prev["EMA15"]
     )
 
+    # Bearish confirmation
     bearish_confirmation = (
-        last["Close"] < last["Open"]
+
+        last["Close"]
+        < last["Open"]
+
         and
-        last["Close"] < last["EMA9"]
+
+        last["Close"]
+        < last["EMA9"]
     )
 
+    # Previous candle low breakout
     sell_breakout = (
-        last["Close"] < prev["Low"]
+
+        last["Close"]
+        < prev["Low"]
+    )
+
+    sell_vwap_distance = (
+        vwap_distance_percent(
+            close,
+            vwap
+        )
+    )
+
+    vwap_near_sell = (
+        sell_vwap_distance
+        <= 0.80
     )
 
     if (
+
         bear_trend
         and sell_pullback
         and bearish_confirmation
         and sell_breakout
+
     ):
 
         entry = close
 
-        sl = max(
+        raw_sl = max(
             float(prev["High"]),
             float(last["High"])
         )
 
-        risk = sl - entry
+        risk = raw_sl - entry
 
-        if risk > 0:
+        # ----------------------------------------------------
+        # ONLY 10 TO 15 POINT STOP LOSS
+        # ----------------------------------------------------
 
-            target = entry - (
-                risk * 2
+        if valid_stop_loss(risk):
+
+            target = (
+                entry
+                - risk * RISK_REWARD
             )
 
             return {
+
                 "signal": "SELL",
+
                 "status": "SETUP READY",
+
                 "reason": (
                     "Price below VWAP + "
                     "EMA9 below EMA15 + "
-                    "EMA pullback + "
+                    "EMA slope downward + "
+                    "clean EMA pullback + "
                     "bearish confirmation + "
                     "previous candle low breakout"
                 ),
+
                 "entry": entry,
-                "sl": sl,
+
+                "sl": raw_sl,
+
                 "target": target,
-                "vwap_near": vwap_near
+
+                "risk": risk,
+
+                "vwap_near": vwap_near_sell
             }
 
     # ========================================================
@@ -454,35 +622,49 @@ def get_signal(df):
 
         reason = (
             "Bullish side: waiting for clean "
-            "EMA pullback + confirmation + breakout"
+            "EMA pullback + confirmation + breakout."
         )
 
     elif close < vwap:
 
         reason = (
             "Bearish side: waiting for clean "
-            "EMA pullback + confirmation + breakout"
+            "EMA pullback + confirmation + breakout."
         )
 
     else:
 
         reason = (
-            "Waiting for clear direction around VWAP"
+            "Waiting for clear direction around VWAP."
         )
 
     return {
+
         "signal": "WAIT",
+
         "status": "WAIT",
+
         "reason": reason,
+
         "entry": None,
+
         "sl": None,
+
         "target": None,
-        "vwap_near": vwap_near
+
+        "risk": None,
+
+        "vwap_near": (
+            vwap_distance_percent(
+                close,
+                vwap
+            ) <= 0.80
+        )
     }
 
 
 # ============================================================
-# BACKTEST
+# HISTORICAL BACKTEST
 # ============================================================
 
 def run_backtest(df):
@@ -492,24 +674,18 @@ def run_backtest(df):
     if len(df) < 30:
         return trades
 
-    # --------------------------------------------------------
-    # ONE MOVE = ONE TRADE
-    # --------------------------------------------------------
-
+    # One direction = one trade lock
     direction_lock = None
 
     position = None
 
-    for i in range(
-        20,
-        len(df) - 1
-    ):
+    for i in range(20, len(df) - 1):
 
         row = df.iloc[i]
         next_row = df.iloc[i + 1]
 
         # ====================================================
-        # OPEN POSITION MANAGEMENT
+        # MANAGE OPEN TRADE
         # ====================================================
 
         if position is not None:
@@ -519,6 +695,7 @@ def run_backtest(df):
             entry = position["entry"]
             sl = position["sl"]
             target = position["target"]
+            risk = position["risk"]
 
             exit_price = None
             exit_reason = None
@@ -528,6 +705,9 @@ def run_backtest(df):
             # ------------------------------------------------
 
             if side == "BUY":
+
+                # Conservative:
+                # Stop loss checked first
 
                 if row["Low"] <= sl:
 
@@ -564,35 +744,33 @@ def run_backtest(df):
                 if side == "BUY":
 
                     points = (
-                        exit_price -
-                        entry
+                        exit_price
+                        - entry
                     )
 
                 else:
 
                     points = (
-                        entry -
-                        exit_price
+                        entry
+                        - exit_price
                     )
 
-                risk = abs(
-                    entry - sl
+                r_multiple = (
+
+                    points
+                    / risk
+
+                    if risk > 0
+
+                    else 0
                 )
 
-                if risk > 0:
-
-                    r_multiple = (
-                        points /
-                        risk
-                    )
-
-                else:
-
-                    r_multiple = 0
-
                 result = (
+
                     "WIN"
+
                     if points > 0
+
                     else "LOSS"
                 )
 
@@ -601,34 +779,37 @@ def run_backtest(df):
                     "Signal": side,
 
                     "Entry Time":
-                    position["entry_time"],
+                        position["entry_time"],
 
                     "Exit Time":
-                    row.name,
+                        row.name,
 
                     "Entry":
-                    round(entry, 2),
+                        round(entry, 2),
 
                     "SL":
-                    round(sl, 2),
+                        round(sl, 2),
+
+                    "Risk (Pts)":
+                        round(risk, 2),
 
                     "Target":
-                    round(target, 2),
+                        round(target, 2),
 
                     "Exit":
-                    round(exit_price, 2),
+                        round(exit_price, 2),
 
                     "Points":
-                    round(points, 2),
+                        round(points, 2),
 
                     "R Multiple":
-                    round(r_multiple, 2),
+                        round(r_multiple, 2),
 
                     "Exit Reason":
-                    exit_reason,
+                        exit_reason,
 
                     "Result":
-                    result
+                        result
                 })
 
                 position = None
@@ -642,9 +823,15 @@ def run_backtest(df):
         if direction_lock == "BUY":
 
             if (
-                row["Close"] < row["VWAP"]
+
+                row["Close"]
+                < row["VWAP"]
+
                 or
-                row["EMA9"] < row["EMA15"]
+
+                row["EMA9"]
+                < row["EMA15"]
+
             ):
 
                 direction_lock = None
@@ -652,252 +839,250 @@ def run_backtest(df):
         elif direction_lock == "SELL":
 
             if (
-                row["Close"] > row["VWAP"]
+
+                row["Close"]
+                > row["VWAP"]
+
                 or
-                row["EMA9"] > row["EMA15"]
+
+                row["EMA9"]
+                > row["EMA15"]
+
             ):
 
                 direction_lock = None
 
-        # ====================================================
-        # PREVIOUS CANDLE
-        # ====================================================
-
         prev = df.iloc[i - 1]
 
         # ====================================================
-        # BUY SETUP
+        # BUY BACKTEST CONDITIONS
         # ====================================================
 
         bull_trend = (
 
-            row["Close"] >
-            row["VWAP"]
+            row["Close"]
+            > row["VWAP"]
 
             and
 
-            row["EMA9"] >
-            row["EMA15"]
+            row["EMA9"]
+            > row["EMA15"]
 
             and
 
-            row["EMA9_Slope"] > 0
+            row["EMA9_Slope"]
+            > 0
         )
 
         buy_pullback = (
 
-            prev["Low"] <= max(
+            prev["Low"]
+            <= max(
                 prev["EMA9"],
                 prev["EMA15"]
             )
 
             and
 
-            prev["Close"] >=
-            prev["EMA15"]
+            prev["Close"]
+            >= prev["EMA15"]
         )
 
         buy_confirmation = (
 
-            row["Close"] >
-            row["Open"]
+            row["Close"]
+            > row["Open"]
 
             and
 
-            row["Close"] >
-            row["EMA9"]
+            row["Close"]
+            > row["EMA9"]
         )
 
         buy_breakout = (
 
-            row["Close"] >
-            prev["High"]
+            row["Close"]
+            > prev["High"]
         )
 
         if (
 
             direction_lock != "BUY"
 
-            and
+            and bull_trend
 
-            bull_trend
+            and buy_pullback
 
-            and
+            and buy_confirmation
 
-            buy_pullback
+            and buy_breakout
 
-            and
-
-            buy_confirmation
-
-            and
-
-            buy_breakout
         ):
 
             # Entry on next candle open
-
             entry = float(
                 next_row["Open"]
             )
 
             sl = min(
+
                 float(prev["Low"]),
+
                 float(row["Low"])
             )
 
             risk = entry - sl
 
-            if risk > 0.01:
+            # ------------------------------------------------
+            # VALID ONLY 10 TO 15 POINT SL
+            # ------------------------------------------------
+
+            if valid_stop_loss(risk):
 
                 target = (
-                    entry +
-                    risk * 2
+
+                    entry
+                    + risk * RISK_REWARD
                 )
 
                 position = {
 
-                    "side":
-                    "BUY",
+                    "side": "BUY",
 
-                    "entry":
-                    entry,
+                    "entry": entry,
 
-                    "sl":
-                    sl,
+                    "sl": sl,
 
-                    "target":
-                    target,
+                    "target": target,
+
+                    "risk": risk,
 
                     "entry_time":
-                    next_row.name
+                        next_row.name
                 }
 
+                # One move one trade
                 direction_lock = "BUY"
 
                 continue
 
         # ====================================================
-        # SELL SETUP
+        # SELL BACKTEST CONDITIONS
         # ====================================================
 
         bear_trend = (
 
-            row["Close"] <
-            row["VWAP"]
+            row["Close"]
+            < row["VWAP"]
 
             and
 
-            row["EMA9"] <
-            row["EMA15"]
+            row["EMA9"]
+            < row["EMA15"]
 
             and
 
-            row["EMA9_Slope"] < 0
+            row["EMA9_Slope"]
+            < 0
         )
 
         sell_pullback = (
 
-            prev["High"] >= min(
+            prev["High"]
+            >= min(
                 prev["EMA9"],
                 prev["EMA15"]
             )
 
             and
 
-            prev["Close"] <=
-            prev["EMA15"]
+            prev["Close"]
+            <= prev["EMA15"]
         )
 
         sell_confirmation = (
 
-            row["Close"] <
-            row["Open"]
+            row["Close"]
+            < row["Open"]
 
             and
 
-            row["Close"] <
-            row["EMA9"]
+            row["Close"]
+            < row["EMA9"]
         )
 
         sell_breakout = (
 
-            row["Close"] <
-            prev["Low"]
+            row["Close"]
+            < prev["Low"]
         )
 
         if (
 
             direction_lock != "SELL"
 
-            and
+            and bear_trend
 
-            bear_trend
+            and sell_pullback
 
-            and
+            and sell_confirmation
 
-            sell_pullback
+            and sell_breakout
 
-            and
-
-            sell_confirmation
-
-            and
-
-            sell_breakout
         ):
-
-            # Entry on next candle open
 
             entry = float(
                 next_row["Open"]
             )
 
             sl = max(
+
                 float(prev["High"]),
+
                 float(row["High"])
             )
 
             risk = sl - entry
 
-            if risk > 0.01:
+            # ------------------------------------------------
+            # VALID ONLY 10 TO 15 POINT SL
+            # ------------------------------------------------
+
+            if valid_stop_loss(risk):
 
                 target = (
-                    entry -
-                    risk * 2
+
+                    entry
+                    - risk * RISK_REWARD
                 )
 
                 position = {
 
-                    "side":
-                    "SELL",
+                    "side": "SELL",
 
-                    "entry":
-                    entry,
+                    "entry": entry,
 
-                    "sl":
-                    sl,
+                    "sl": sl,
 
-                    "target":
-                    target,
+                    "target": target,
+
+                    "risk": risk,
 
                     "entry_time":
-                    next_row.name
+                        next_row.name
                 }
 
+                # One move one trade
                 direction_lock = "SELL"
 
     return trades
 
 
 # ============================================================
-# CHART FUNCTION
+# CREATE CHART
 # ============================================================
 
-def create_chart(
-    df,
-    symbol_name
-):
+def create_chart(df, symbol_name):
 
     chart_df = df.tail(375).copy()
 
@@ -991,9 +1176,7 @@ def create_chart(
 
     fig.update_layout(
 
-        title=(
-            f"{symbol_name} Index Chart"
-        ),
+        title=f"{symbol_name} Index Chart",
 
         height=620,
 
@@ -1008,7 +1191,7 @@ def create_chart(
         margin=dict(
             l=20,
             r=20,
-            t=50,
+            t=60,
             b=20
         ),
 
@@ -1042,9 +1225,7 @@ def create_chart(
 # HEADER
 # ============================================================
 
-st.title(
-    "📈 Personal 9-15 EMA Scalping Scanner"
-)
+st.title("📈 Personal 9-15 EMA Scalping Scanner")
 
 st.caption(
     "Index Only Strategy | "
@@ -1055,6 +1236,7 @@ st.caption(
     "Confirmation Candle | "
     "Breakout Entry | "
     "One Move = One Trade | "
+    "Stop Loss 10-15 Points | "
     "Fixed 1:2 Risk:Reward"
 )
 
@@ -1066,6 +1248,7 @@ st.caption(
 col1, col2, col3 = st.columns(
     [1, 1, 0.55]
 )
+
 
 with col1:
 
@@ -1098,7 +1281,7 @@ with col3:
 
     if st.button("🔄 Refresh"):
 
-        st.cache_data.clear()
+        load_data.clear()
 
         st.rerun()
 
@@ -1107,13 +1290,9 @@ with col3:
 # LOAD DATA
 # ============================================================
 
-symbol = INDEX_MAP[
-    selected_index
-]
+symbol = INDEX_MAP[selected_index]
 
-interval, period = TIMEFRAME_MAP[
-    selected_tf
-]
+interval, period = TIMEFRAME_MAP[selected_tf]
 
 df = load_data(
     symbol,
@@ -1130,7 +1309,7 @@ if df.empty:
 
     st.error(
         "Market data is currently unavailable. "
-        "Please refresh and try again."
+        "Please press Refresh and try again."
     )
 
     st.stop()
@@ -1151,12 +1330,14 @@ last = df.iloc[-1]
 # CURRENT SIGNAL
 # ============================================================
 
-st.header(
-    "🎯 Current Signal"
-)
+st.header("🎯 Current Signal")
 
 signal_col, status_col = st.columns(2)
 
+
+# ------------------------------------------------------------
+# SIGNAL BOX
+# ------------------------------------------------------------
 
 with signal_col:
 
@@ -1164,87 +1345,88 @@ with signal_col:
 
     if signal_name == "BUY":
 
-        signal_color = "#38d996"
+        signal_class = "signal-buy"
 
     elif signal_name == "SELL":
 
-        signal_color = "#ff6464"
+        signal_class = "signal-sell"
 
     else:
 
-        signal_color = "#ffd166"
+        signal_class = "signal-wait"
 
     st.markdown(
-
         f"""
         <div class="metric-box">
-
             <div class="metric-label">
                 Signal
             </div>
 
-            <div class="metric-value"
-                 style="color:{signal_color};">
-
+            <div class="metric-value {signal_class}">
                 {signal_name}
-
             </div>
-
         </div>
         """,
-
         unsafe_allow_html=True
     )
 
 
+# ------------------------------------------------------------
+# STATUS BOX
+# ------------------------------------------------------------
+
 with status_col:
 
-    st.markdown(
+    status_value = signal["status"]
 
+    if status_value == "SETUP READY":
+
+        status_class = "signal-buy"
+
+    else:
+
+        status_class = "signal-wait"
+
+    st.markdown(
         f"""
         <div class="metric-box">
-
             <div class="metric-label">
                 Trade Status
             </div>
 
-            <div class="metric-value">
-
-                {signal["status"]}
-
+            <div class="metric-value {status_class}">
+                {status_value}
             </div>
-
         </div>
         """,
-
         unsafe_allow_html=True
     )
 
 
 # ============================================================
-# CURRENT INDICATOR VALUES
+# MARKET VALUES
 # ============================================================
 
 metric1, metric2, metric3, metric4 = st.columns(4)
 
 metric1.metric(
     "Price",
-    f"{last['Close']:.2f}"
+    f"{float(last['Close']):.2f}"
 )
 
 metric2.metric(
     "EMA 9",
-    f"{last['EMA9']:.2f}"
+    f"{float(last['EMA9']):.2f}"
 )
 
 metric3.metric(
     "EMA 15",
-    f"{last['EMA15']:.2f}"
+    f"{float(last['EMA15']):.2f}"
 )
 
 metric4.metric(
     "VWAP",
-    f"{last['VWAP']:.2f}"
+    f"{float(last['VWAP']):.2f}"
 )
 
 
@@ -1252,25 +1434,30 @@ metric4.metric(
 # SIGNAL CONDITION
 # ============================================================
 
-st.subheader(
-    "Signal Condition"
-)
+st.subheader("Signal Condition")
 
-st.write(
-    signal["reason"]
-)
+st.write(signal["reason"])
 
 if signal["vwap_near"]:
 
-    st.success(
-        "VWAP is relatively near the current price."
+    st.markdown(
+        """
+        <div class="success-box">
+        ✓ VWAP is relatively near the current price.
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
 else:
 
-    st.info(
-        "VWAP is farther from current price. "
-        "Setup quality should be judged carefully."
+    st.markdown(
+        """
+        <div class="info-box">
+        VWAP direction filter is active.
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
 
@@ -1278,52 +1465,43 @@ else:
 # TRADE LEVELS
 # ============================================================
 
-if signal["signal"] in [
-    "BUY",
-    "SELL"
-]:
+if signal["signal"] in ["BUY", "SELL"]:
 
-    st.header(
-        "📍 Trade Levels"
-    )
+    st.header("📍 Trade Levels")
 
-    level1, level2, level3 = st.columns(3)
+    entry_col, sl_col, target_col = st.columns(3)
 
-    level1.metric(
+    entry_col.metric(
         "Entry",
         f"{signal['entry']:.2f}"
     )
 
-    level2.metric(
+    sl_col.metric(
         "Stop Loss",
         f"{signal['sl']:.2f}"
     )
 
-    level3.metric(
+    target_col.metric(
         "Target (1:2)",
         f"{signal['target']:.2f}"
     )
 
+    st.caption(
+        f"Risk: {signal['risk']:.2f} points | "
+        f"Stop Loss rule: "
+        f"{MIN_STOP_LOSS:.0f}-{MAX_STOP_LOSS:.0f} points | "
+        f"Target = 2R"
+    )
+
+else:
+
     st.markdown(
-
-        f"""
-        <div class="info-box">
-
-        Active setup:
-        <b>{signal["signal"]}</b>
-
-        | Entry:
-        {signal["entry"]:.2f}
-
-        | SL:
-        {signal["sl"]:.2f}
-
-        | Target:
-        {signal["target"]:.2f}
-
+        """
+        <div class="warning-box">
+        No active trade setup. Wait for all strategy
+        conditions to match.
         </div>
         """,
-
         unsafe_allow_html=True
     )
 
@@ -1332,56 +1510,54 @@ if signal["signal"] in [
 # STRATEGY RULES
 # ============================================================
 
-with st.expander(
-    "📘 Strategy Rules"
-):
+with st.expander("📘 Strategy Rules"):
 
-    left, right = st.columns(2)
+    rule_col1, rule_col2 = st.columns(2)
 
-    with left:
+    with rule_col1:
 
-        st.subheader("BUY")
+        st.markdown("### 🟢 BUY")
 
-        st.markdown("""
+        st.markdown(
+            """
+            1. Price VWAP के ऊपर  
+            2. EMA 9 EMA 15 के ऊपर  
+            3. EMA 9 slope upward  
+            4. Price EMA 9/15 zone तक pullback करे  
+            5. Bullish confirmation candle बने  
+            6. Previous candle high breakout  
+            7. एक move में केवल एक trade  
+            8. Stop Loss minimum 10 points  
+            9. Stop Loss maximum 15 points  
+            10. Target fixed 1:2
+            """
+        )
 
-1. Price **VWAP के ऊपर**
-2. **EMA 9 > EMA 15**
-3. EMA 9 का slope ऊपर
-4. Market EMA zone तक pullback करे
-5. Bullish confirmation candle बने
-6. Previous candle high के ऊपर breakout मिले
-7. VWAP पास में हो तो setup बेहतर
-8. एक move में केवल एक trade
-9. Target = **1:2 Risk : Reward**
+    with rule_col2:
 
-        """)
+        st.markdown("### 🔴 SELL")
 
-    with right:
-
-        st.subheader("SELL")
-
-        st.markdown("""
-
-1. Price **VWAP के नीचे**
-2. **EMA 9 < EMA 15**
-3. EMA 9 का slope नीचे
-4. Market EMA zone तक pullback करे
-5. Bearish confirmation candle बने
-6. Previous candle low के नीचे breakout मिले
-7. VWAP पास में हो तो setup बेहतर
-8. एक move में केवल एक trade
-9. Target = **1:2 Risk : Reward**
-
-        """)
+        st.markdown(
+            """
+            1. Price VWAP के नीचे  
+            2. EMA 9 EMA 15 के नीचे  
+            3. EMA 9 slope downward  
+            4. Price EMA 9/15 zone तक pullback करे  
+            5. Bearish confirmation candle बने  
+            6. Previous candle low breakout  
+            7. एक move में केवल एक trade  
+            8. Stop Loss minimum 10 points  
+            9. Stop Loss maximum 15 points  
+            10. Target fixed 1:2
+            """
+        )
 
 
 # ============================================================
 # INDEX CHART
 # ============================================================
 
-st.header(
-    "📊 Index Chart"
-)
+st.header("📊 Index Chart")
 
 fig = create_chart(
     df,
@@ -1398,26 +1574,27 @@ st.plotly_chart(
 # HISTORICAL BACKTEST
 # ============================================================
 
-st.header(
-    "📉 Historical Backtest"
-)
+st.header("📉 Historical Backtest")
 
 trades = run_backtest(df)
 
 
+# ============================================================
+# BACKTEST RESULTS
+# ============================================================
+
 if len(trades) == 0:
 
-    st.warning(
-        "No completed trades found in the available data."
+    st.info(
+        "No completed historical trades found "
+        "with the current strategy rules."
     )
 
 else:
 
     trades_df = pd.DataFrame(trades)
 
-    total_trades = len(
-        trades_df
-    )
+    total_trades = len(trades_df)
 
     wins = len(
         trades_df[
@@ -1432,10 +1609,13 @@ else:
     )
 
     win_rate = (
-        wins /
-        total_trades *
-        100
+
+        wins
+        / total_trades
+        * 100
+
         if total_trades > 0
+
         else 0
     )
 
@@ -1444,7 +1624,7 @@ else:
         .sum()
     )
 
-    avg_r = (
+    average_r = (
         trades_df["R Multiple"]
         .mean()
     )
@@ -1458,62 +1638,67 @@ else:
     # BACKTEST METRICS
     # --------------------------------------------------------
 
-    row1 = st.columns(4)
+    back_cols = st.columns(7)
 
-    row1[0].metric(
+    back_cols[0].metric(
         "Total Trades",
         total_trades
     )
 
-    row1[1].metric(
+    back_cols[1].metric(
         "Wins",
         wins
     )
 
-    row1[2].metric(
+    back_cols[2].metric(
         "Losses",
         losses
     )
 
-    row1[3].metric(
+    back_cols[3].metric(
         "Win Rate",
         f"{win_rate:.1f}%"
     )
 
-    row2 = st.columns(3)
-
-    row2[0].metric(
+    back_cols[4].metric(
         "Net Points",
         f"{net_points:.2f}"
     )
 
-    row2[1].metric(
+    back_cols[5].metric(
         "Average R",
-        f"{avg_r:.2f}R"
+        f"{average_r:.2f}R"
     )
 
-    row2[2].metric(
+    back_cols[6].metric(
         "Best Trade",
         f"{best_trade:.2f}R"
     )
 
     # --------------------------------------------------------
-    # RECENT TRADES
+    # RECENT BACKTEST TRADES
     # --------------------------------------------------------
 
-    st.subheader(
-        "Recent Backtest Trades"
+    st.subheader("Recent Backtest Trades")
+
+    display_df = (
+        trades_df
+        .tail(20)
+        .iloc[::-1]
+        .copy()
     )
 
-    display_df = trades_df.copy()
+    # Format datetime columns
+    for time_col in [
+        "Entry Time",
+        "Exit Time"
+    ]:
 
-    display_df = display_df.iloc[
-        ::-1
-    ]
+        if time_col in display_df.columns:
 
-    display_df = display_df.head(
-        30
-    )
+            display_df[time_col] = pd.to_datetime(
+                display_df[time_col]
+            ).astype(str)
 
     st.dataframe(
         display_df,
@@ -1526,13 +1711,16 @@ else:
 # FOOTER
 # ============================================================
 
+st.divider()
+
 st.caption(
     "Strategy: "
     "VWAP = Direction | "
     "EMA 9/15 = Trend | "
-    "Pullback + Confirmation = Entry | "
+    "Pullback + Confirmation + Breakout = Entry | "
     "One Move = One Trade | "
-    "Fixed 1:2 Risk:Reward"
+    "Stop Loss = 10-15 Points | "
+    "Target = Fixed 1:2"
 )
 
 st.caption(
