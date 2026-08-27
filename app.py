@@ -1,20 +1,19 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import plotly.graph_objects as go
-
+from datetime import datetime, timedelta
 
 # ============================================================
-# PAGE CONFIG
+# CONFIG
 # ============================================================
 
 st.set_page_config(
-    page_title="EMA 9/15 VWAP Scalping Scanner",
+    page_title="Personal 9-15 EMA Scalping Scanner",
     page_icon="📈",
     layout="wide"
 )
-
 
 # ============================================================
 # CUSTOM CSS
@@ -24,49 +23,65 @@ st.markdown("""
 <style>
 
 .stApp {
-    background-color: #080d16;
-    color: #d9e2ef;
+    background-color: #0e1420;
+    color: #d8dee9;
 }
 
-.block-container {
-    padding-top: 1rem;
-    padding-bottom: 2rem;
+.main {
+    background-color: #0e1420;
+}
+
+h1, h2, h3 {
+    color: #d8dee9;
 }
 
 .metric-box {
-    background: #172231;
-    border: 1px solid #26384b;
-    padding: 12px;
-    border-radius: 9px;
-    min-height: 82px;
-    margin-bottom: 8px;
+    background: #1b2b3e;
+    border: 1px solid #263b52;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 10px;
 }
 
 .metric-label {
-    color: #9aa7b7;
-    font-size: 11px;
+    font-size: 13px;
+    color: #aeb8c5;
 }
 
 .metric-value {
-    color: #dce5ef;
-    font-size: 18px;
-    font-weight: 700;
-    margin-top: 6px;
+    font-size: 24px;
+    font-weight: bold;
+    margin-top: 8px;
 }
 
 .signal-buy {
-    color: #48d597;
-    font-weight: 800;
+    color: #38d996;
+    font-weight: bold;
 }
 
 .signal-sell {
-    color: #ff6b81;
-    font-weight: 800;
+    color: #ff6464;
+    font-weight: bold;
 }
 
 .signal-wait {
-    color: #f3c969;
-    font-weight: 800;
+    color: #ffd166;
+    font-weight: bold;
+}
+
+.info-box {
+    background: #1d344b;
+    border-radius: 6px;
+    padding: 14px;
+    color: #b7d8f5;
+    margin-bottom: 15px;
+}
+
+.rule-box {
+    background: #151d29;
+    border: 1px solid #293545;
+    border-radius: 8px;
+    padding: 14px;
 }
 
 </style>
@@ -74,213 +89,64 @@ st.markdown("""
 
 
 # ============================================================
-# CONFIGURATION
+# SETTINGS
 # ============================================================
 
-INDEX_CONFIG = {
-
-    "NIFTY 50": {
-        "symbol": "^NSEI"
-    },
-
-    "BANK NIFTY": {
-        "symbol": "^NSEBANK"
-    },
-
-    "SENSEX": {
-        "symbol": "^BSESN"
-    }
-
+INDEX_MAP = {
+    "NIFTY 50": "^NSEI",
+    "BANK NIFTY": "^NSEBANK",
+    "FINNIFTY": "NIFTY_FIN_SERVICE.NS"
 }
 
-
-TIMEFRAME_CONFIG = {
-
-    "1m": {
-        "interval": "1m",
-        "period": "5d",
-        "resample": None
-    },
-
-    "2m": {
-        "interval": "2m",
-        "period": "5d",
-        "resample": None
-    },
-
-    "3m": {
-        "interval": "1m",
-        "period": "5d",
-        "resample": "3min"
-    },
-
-    "5m": {
-        "interval": "5m",
-        "period": "5d",
-        "resample": None
-    },
-
-    "15m": {
-        "interval": "15m",
-        "period": "5d",
-        "resample": None
-    },
-
-    "1h": {
-        "interval": "60m",
-        "period": "1mo",
-        "resample": None
-    }
-
+TIMEFRAME_MAP = {
+    "1m": ("1m", "5d"),
+    "2m": ("2m", "5d"),
+    "5m": ("5m", "60d"),
+    "15m": ("15m", "60d")
 }
 
 
 # ============================================================
-# STRATEGY SETTINGS
+# DATA FUNCTIONS
 # ============================================================
 
-EMA_FAST = 9
-EMA_SLOW = 15
-
-# VWAP के पास कितना acceptable है
-VWAP_NEAR_PERCENT = 0.20
-
-# Pullback candle EMA9 के पास
-EMA_PULLBACK_PERCENT = 0.12
-
-# पिछले कितने candles में pullback valid
-PULLBACK_LOOKBACK = 5
-
-# Minimum risk
-MIN_RISK_POINTS = 8
-
-# Maximum risk
-MAX_RISK_POINTS = 25
-
-# Minimum RR
-MIN_RR = 2
-
-# Backtest
-BACKTEST_MAX_HOLD_CANDLES = 80
-
-# Same move में तुरंत re-entry रोकने के लिए
-COOLDOWN_CANDLES = 5
-
-# EMA structure exit confirmation
-EXIT_CONFIRM_CANDLES = 2
-
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if "running_trade" not in st.session_state:
-    st.session_state.running_trade = None
-
-if "closed_trades" not in st.session_state:
-    st.session_state.closed_trades = []
-
-if "last_trade_signal_time" not in st.session_state:
-    st.session_state.last_trade_signal_time = None
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def safe_float(value, default=None):
+@st.cache_data(ttl=60)
+def load_data(symbol, interval, period):
 
     try:
-
-        if value is None:
-            return default
-
-        if pd.isna(value):
-            return default
-
-        return float(value)
-
-    except Exception:
-        return default
-
-
-def format_number(value, digits=2):
-
-    if value is None:
-        return "-"
-
-    try:
-        return f"{float(value):,.{digits}f}"
-    except Exception:
-        return "-"
-
-
-def metric_box(label, value, value_class=""):
-
-    return f"""
-    <div class="metric-box">
-        <div class="metric-label">{label}</div>
-        <div class="metric-value {value_class}">
-            {value}
-        </div>
-    </div>
-    """
-
-
-# ============================================================
-# MARKET DATA
-# ============================================================
-
-@st.cache_data(ttl=30)
-def get_market_data(symbol, timeframe):
-
-    config = TIMEFRAME_CONFIG[timeframe]
-
-    try:
-
-        ticker = yf.Ticker(symbol)
-
-        df = ticker.history(
-            period=config["period"],
-            interval=config["interval"],
+        df = yf.download(
+            symbol,
+            interval=interval,
+            period=period,
+            progress=False,
             auto_adjust=False
         )
 
-        if df is None or df.empty:
+        if df.empty:
             return pd.DataFrame()
+
+        # Handle MultiIndex columns
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         df = df.copy()
 
-        if isinstance(df.index, pd.DatetimeIndex):
+        required = ["Open", "High", "Low", "Close"]
 
-            if df.index.tz is not None:
+        for col in required:
+            if col not in df.columns:
+                return pd.DataFrame()
 
-                df.index = df.index.tz_localize(None)
+        if "Volume" not in df.columns:
+            df["Volume"] = 1
 
-        if config["resample"] is not None:
-
-            df = (
-
-                df.resample(
-                    config["resample"]
-                )
-
-                .agg({
-                    "Open": "first",
-                    "High": "max",
-                    "Low": "min",
-                    "Close": "last",
-                    "Volume": "sum"
-                })
-
-                .dropna()
-
-            )
+        df = df.dropna(
+            subset=["Open", "High", "Low", "Close"]
+        )
 
         return df
 
     except Exception:
-
         return pd.DataFrame()
 
 
@@ -288,1288 +154,649 @@ def get_market_data(symbol, timeframe):
 # INDICATORS
 # ============================================================
 
-def calculate_indicators(df):
+def add_indicators(df):
 
-    data = df.copy()
+    df = df.copy()
 
-    # --------------------------------------------------------
     # EMA 9
-    # --------------------------------------------------------
-
-    data["EMA9"] = (
-
-        data["Close"]
-
-        .ewm(
-            span=EMA_FAST,
-            adjust=False
-        )
-
+    df["EMA9"] = (
+        df["Close"]
+        .ewm(span=9, adjust=False)
         .mean()
-
     )
 
-    # --------------------------------------------------------
     # EMA 15
-    # --------------------------------------------------------
-
-    data["EMA15"] = (
-
-        data["Close"]
-
-        .ewm(
-            span=EMA_SLOW,
-            adjust=False
-        )
-
+    df["EMA15"] = (
+        df["Close"]
+        .ewm(span=15, adjust=False)
         .mean()
-
     )
 
     # --------------------------------------------------------
-    # PRICE FOR VWAP
-    #
-    # (OPEN + HIGH + LOW + CLOSE) / 4
+    # VWAP
+    # Typical price requested by strategy:
+    # (Open + High + Low + Close) / 4
     # --------------------------------------------------------
 
-    data["VWAPPrice"] = (
-
-        data["Open"]
-
-        + data["High"]
-
-        + data["Low"]
-
-        + data["Close"]
-
+    df["TP"] = (
+        df["Open"] +
+        df["High"] +
+        df["Low"] +
+        df["Close"]
     ) / 4
 
-    # --------------------------------------------------------
-    # DAILY VWAP
-    # --------------------------------------------------------
-
-    data["TradeDate"] = pd.to_datetime(
-        data.index
-    ).date
-
-    volume = (
-
-        data["Volume"]
-
-        .replace(0, np.nan)
-
-        .fillna(1)
-
+    # Make sure volume is valid
+    df["Volume"] = (
+        pd.to_numeric(df["Volume"], errors="coerce")
+        .fillna(0)
     )
 
-    cumulative_price_volume = (
+    # If index volume is unavailable/zero,
+    # use 1 so OHLC4-based cumulative VWAP still works.
+    df.loc[df["Volume"] <= 0, "Volume"] = 1
 
-        data["VWAPPrice"]
+    # Session date
+    if isinstance(df.index, pd.DatetimeIndex):
+        df["Session"] = df.index.date
+    else:
+        df["Session"] = 0
 
-        * volume
+    df["PV"] = df["TP"] * df["Volume"]
 
-    ).groupby(
-        data["TradeDate"]
-    ).cumsum()
-
-    cumulative_volume = (
-
-        volume
-
-        .groupby(
-            data["TradeDate"]
-        )
-
+    df["CumPV"] = (
+        df.groupby("Session")["PV"]
         .cumsum()
-
     )
 
-    data["VWAP"] = (
-
-        cumulative_price_volume
-
-        / cumulative_volume
-
+    df["CumVolume"] = (
+        df.groupby("Session")["Volume"]
+        .cumsum()
     )
 
-    data["VWAP"] = (
-
-        data["VWAP"]
-
-        .fillna(
-            data["VWAPPrice"]
-        )
-
+    df["VWAP"] = (
+        df["CumPV"] /
+        df["CumVolume"]
     )
 
-    # --------------------------------------------------------
-    # CANDLE BODY
-    # --------------------------------------------------------
-
-    data["Body"] = (
-
-        data["Close"]
-
-        - data["Open"]
-
-    ).abs()
-
-    # --------------------------------------------------------
-    # RANGE
-    # --------------------------------------------------------
-
-    data["Range"] = (
-
-        data["High"]
-
-        - data["Low"]
-
+    # EMA slopes
+    df["EMA9_Slope"] = (
+        df["EMA9"] -
+        df["EMA9"].shift(3)
     )
 
-    # --------------------------------------------------------
-    # UPPER WICK
-    # --------------------------------------------------------
-
-    data["UpperWick"] = (
-
-        data["High"]
-
-        - data[
-            ["Open", "Close"]
-        ].max(axis=1)
-
+    df["EMA15_Slope"] = (
+        df["EMA15"] -
+        df["EMA15"].shift(3)
     )
 
-    # --------------------------------------------------------
-    # LOWER WICK
-    # --------------------------------------------------------
-
-    data["LowerWick"] = (
-
-        data[
-            ["Open", "Close"]
-        ].min(axis=1)
-
-        - data["Low"]
-
+    # Trend conditions
+    df["BullTrend"] = (
+        (df["Close"] > df["VWAP"]) &
+        (df["EMA9"] > df["EMA15"]) &
+        (df["EMA9_Slope"] > 0)
     )
 
-    return data
-
-
-# ============================================================
-# MARKET DIRECTION
-# ============================================================
-
-def get_market_direction(last):
-
-    price = safe_float(
-        last["Close"]
+    df["BearTrend"] = (
+        (df["Close"] < df["VWAP"]) &
+        (df["EMA9"] < df["EMA15"]) &
+        (df["EMA9_Slope"] < 0)
     )
 
-    vwap = safe_float(
-        last["VWAP"]
-    )
-
-    if price is None or vwap is None:
-
-        return "NEUTRAL"
-
-    if price > vwap:
-
-        return "BULLISH"
-
-    if price < vwap:
-
-        return "BEARISH"
-
-    return "NEUTRAL"
+    return df
 
 
 # ============================================================
 # VWAP DISTANCE
 # ============================================================
 
-def is_near_vwap(price, vwap):
+def vwap_distance_percent(price, vwap):
 
-    if price is None or vwap is None:
-        return False
+    if vwap == 0 or pd.isna(vwap):
+        return 999
 
-    if vwap == 0:
-        return False
-
-    distance_percent = (
-
-        abs(price - vwap)
-
-        / vwap
-
-        * 100
-
-    )
-
-    return distance_percent <= VWAP_NEAR_PERCENT
+    return abs(price - vwap) / vwap * 100
 
 
 # ============================================================
-# EMA PULLBACK
+# STRATEGY SIGNAL
 # ============================================================
 
-def is_ema9_pullback(data, position, direction):
+def get_signal(df):
 
-    start = max(
-        0,
-        position - PULLBACK_LOOKBACK
+    if len(df) < 25:
+        return {
+            "signal": "WAIT",
+            "status": "NO DATA",
+            "reason": "Not enough candles",
+            "entry": None,
+            "sl": None,
+            "target": None
+        }
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+
+    close = float(last["Close"])
+    high = float(last["High"])
+    low = float(last["Low"])
+
+    ema9 = float(last["EMA9"])
+    ema15 = float(last["EMA15"])
+    vwap = float(last["VWAP"])
+
+    # --------------------------------------------------------
+    # BUY TREND
+    # --------------------------------------------------------
+
+    bull_trend = (
+        close > vwap and
+        ema9 > ema15 and
+        last["EMA9_Slope"] > 0
     )
 
-    recent = data.iloc[
-        start:position
-    ]
-
-    if recent.empty:
-        return False
-
-    for _, row in recent.iterrows():
-
-        low = safe_float(
-            row["Low"]
-        )
-
-        high = safe_float(
-            row["High"]
-        )
-
-        ema9 = safe_float(
-            row["EMA9"]
-        )
-
-        if ema9 is None:
-            continue
-
-        tolerance = (
-
-            ema9
-
-            * EMA_PULLBACK_PERCENT
-
-            / 100
-
-        )
-
-        if direction == "BUY":
-
-            if low <= ema9 + tolerance:
-
-                return True
-
-        elif direction == "SELL":
-
-            if high >= ema9 - tolerance:
-
-                return True
-
-    return False
-
-
-# ============================================================
-# EMA TREND
-# ============================================================
-
-def get_ema_direction(last):
-
-    price = safe_float(
-        last["Close"]
+    # Previous candle touches EMA zone
+    buy_pullback = (
+        prev["Low"] <= max(prev["EMA9"], prev["EMA15"]) and
+        prev["Close"] >= prev["EMA15"]
     )
 
-    ema9 = safe_float(
-        last["EMA9"]
+    # Bullish confirmation
+    bullish_confirmation = (
+        last["Close"] > last["Open"] and
+        last["Close"] > last["EMA9"]
     )
 
-    ema15 = safe_float(
-        last["EMA15"]
+    # Break previous candle high
+    buy_breakout = (
+        last["Close"] > prev["High"]
     )
+
+    buy_vwap_distance = vwap_distance_percent(
+        close,
+        vwap
+    )
+
+    # VWAP near setup gets priority
+    vwap_near_buy = buy_vwap_distance <= 0.80
 
     if (
-
-        price > ema9
-
-        and
-
-        ema9 > ema15
-
+        bull_trend and
+        buy_pullback and
+        bullish_confirmation and
+        buy_breakout
     ):
 
-        return "BUY"
+        entry = close
+
+        sl = min(
+            float(prev["Low"]),
+            float(last["Low"])
+        )
+
+        risk = entry - sl
+
+        if risk > 0:
+
+            target = entry + (risk * 2)
+
+            return {
+                "signal": "BUY",
+                "status": "SETUP READY",
+                "reason": (
+                    "Price above VWAP + "
+                    "EMA9 above EMA15 + "
+                    "EMA pullback + "
+                    "bullish confirmation + "
+                    "previous candle high breakout"
+                ),
+                "entry": entry,
+                "sl": sl,
+                "target": target,
+                "vwap_near": vwap_near_buy
+            }
+
+    # --------------------------------------------------------
+    # SELL TREND
+    # --------------------------------------------------------
+
+    bear_trend = (
+        close < vwap and
+        ema9 < ema15 and
+        last["EMA9_Slope"] < 0
+    )
+
+    # Previous candle touches EMA zone
+    sell_pullback = (
+        prev["High"] >= min(prev["EMA9"], prev["EMA15"]) and
+        prev["Close"] <= prev["EMA15"]
+    )
+
+    # Bearish confirmation
+    bearish_confirmation = (
+        last["Close"] < last["Open"] and
+        last["Close"] < last["EMA9"]
+    )
+
+    # Break previous candle low
+    sell_breakout = (
+        last["Close"] < prev["Low"]
+    )
+
+    sell_vwap_distance = vwap_distance_percent(
+        close,
+        vwap
+    )
+
+    vwap_near_sell = sell_vwap_distance <= 0.80
 
     if (
-
-        price < ema9
-
-        and
-
-        ema9 < ema15
-
+        bear_trend and
+        sell_pullback and
+        bearish_confirmation and
+        sell_breakout
     ):
 
-        return "SELL"
+        entry = close
 
-    return "NEUTRAL"
+        sl = max(
+            float(prev["High"]),
+            float(last["High"])
+        )
 
+        risk = sl - entry
 
-# ============================================================
-# CONFIRMATION CANDLE
-# ============================================================
+        if risk > 0:
 
-def is_confirmation_candle(last, direction):
+            target = entry - (risk * 2)
 
-    close = safe_float(
-        last["Close"]
-    )
-
-    open_price = safe_float(
-        last["Open"]
-    )
-
-    high = safe_float(
-        last["High"]
-    )
-
-    low = safe_float(
-        last["Low"]
-    )
-
-    body = abs(
-        close - open_price
-    )
-
-    candle_range = max(
-        high - low,
-        0.0001
-    )
-
-    body_percent = (
-
-        body
-
-        / candle_range
-
-        * 100
-
-    )
-
-    # Very weak candle avoid
-    if body_percent < 30:
-
-        return False
-
-    if direction == "BUY":
-
-        return close > open_price
-
-    if direction == "SELL":
-
-        return close < open_price
-
-    return False
-
-
-# ============================================================
-# BREAK OF PREVIOUS CANDLE
-# ============================================================
-
-def is_momentum_confirmation(
-    last,
-    previous,
-    direction
-):
-
-    close = safe_float(
-        last["Close"]
-    )
-
-    previous_high = safe_float(
-        previous["High"]
-    )
-
-    previous_low = safe_float(
-        previous["Low"]
-    )
-
-    if direction == "BUY":
-
-        return close > previous_high
-
-    if direction == "SELL":
-
-        return close < previous_low
-
-    return False
-
-
-# ============================================================
-# SIGNAL CALCULATION
-# ============================================================
-
-def calculate_signal_at(data, position):
-
-    if position < 25:
-
-        return None
-
-    last = data.iloc[position]
-
-    previous = data.iloc[
-        position - 1
-    ]
-
-    price = safe_float(
-        last["Close"]
-    )
-
-    ema9 = safe_float(
-        last["EMA9"]
-    )
-
-    ema15 = safe_float(
-        last["EMA15"]
-    )
-
-    vwap = safe_float(
-        last["VWAP"]
-    )
-
-    market_direction = (
-        get_market_direction(last)
-    )
-
-    ema_direction = (
-        get_ema_direction(last)
-    )
-
-    direction = "WAIT"
-
-    reason = []
+            return {
+                "signal": "SELL",
+                "status": "SETUP READY",
+                "reason": (
+                    "Price below VWAP + "
+                    "EMA9 below EMA15 + "
+                    "EMA pullback + "
+                    "bearish confirmation + "
+                    "previous candle low breakout"
+                ),
+                "entry": entry,
+                "sl": sl,
+                "target": target,
+                "vwap_near": vwap_near_sell
+            }
 
     # --------------------------------------------------------
-    # BUY CONDITIONS
+    # WAIT
     # --------------------------------------------------------
 
-    if (
-
-        market_direction == "BULLISH"
-
-        and
-
-        ema_direction == "BUY"
-
-    ):
-
-        pullback = is_ema9_pullback(
-            data,
-            position,
-            "BUY"
-        )
-
-        confirmation = (
-            is_confirmation_candle(
-                last,
-                "BUY"
-            )
-        )
-
-        momentum = (
-            is_momentum_confirmation(
-                last,
-                previous,
-                "BUY"
-            )
-        )
-
-        near_vwap = is_near_vwap(
-            price,
-            vwap
-        )
-
-        if (
-
-            pullback
-
-            and
-
-            confirmation
-
-            and
-
-            momentum
-
-        ):
-
-            direction = "BUY"
-
-            reason.append(
-                "Price above VWAP"
-            )
-
-            reason.append(
-                "EMA 9 > EMA 15"
-            )
-
-            reason.append(
-                "EMA pullback"
-            )
-
-            reason.append(
-                "Bullish confirmation"
-            )
-
-            if near_vwap:
-
-                reason.append(
-                    "Near VWAP"
-                )
-
-    # --------------------------------------------------------
-    # SELL CONDITIONS
-    # --------------------------------------------------------
-
-    elif (
-
-        market_direction == "BEARISH"
-
-        and
-
-        ema_direction == "SELL"
-
-    ):
-
-        pullback = is_ema9_pullback(
-            data,
-            position,
-            "SELL"
-        )
-
-        confirmation = (
-            is_confirmation_candle(
-                last,
-                "SELL"
-            )
-        )
-
-        momentum = (
-            is_momentum_confirmation(
-                last,
-                previous,
-                "SELL"
-            )
-        )
-
-        near_vwap = is_near_vwap(
-            price,
-            vwap
-        )
-
-        if (
-
-            pullback
-
-            and
-
-            confirmation
-
-            and
-
-            momentum
-
-        ):
-
-            direction = "SELL"
-
-            reason.append(
-                "Price below VWAP"
-            )
-
-            reason.append(
-                "EMA 9 < EMA 15"
-            )
-
-            reason.append(
-                "EMA pullback"
-            )
-
-            reason.append(
-                "Bearish confirmation"
-            )
-
-            if near_vwap:
-
-                reason.append(
-                    "Near VWAP"
-                )
-
-    if direction == "WAIT":
-
-        reason.append(
-            "Waiting for EMA pullback + confirmation"
-        )
-
-    return {
-
-        "signal": direction,
-
-        "price": price,
-
-        "ema9": ema9,
-
-        "ema15": ema15,
-
-        "vwap": vwap,
-
-        "market_direction": (
-            market_direction
-        ),
-
-        "reason": (
-            " | ".join(reason)
-        ),
-
-        "time": data.index[position]
-
-    }
-
-
-# ============================================================
-# CURRENT SIGNAL
-# ============================================================
-
-def get_signal(data):
-
-    if len(data) < 26:
-        return None
-
-    return calculate_signal_at(
-        data,
-        len(data) - 1
-    )
-
-
-# ============================================================
-# CALCULATE RISK
-# ============================================================
-
-def calculate_risk(candle):
-
-    candle_range = (
-
-        safe_float(candle["High"])
-
-        - safe_float(candle["Low"])
-
-    )
-
-    risk = candle_range * 0.75
-
-    risk = max(
-        MIN_RISK_POINTS,
-        risk
-    )
-
-    risk = min(
-        MAX_RISK_POINTS,
-        risk
-    )
-
-    return risk
-
-
-# ============================================================
-# CREATE TRADE LEVELS
-# ============================================================
-
-def create_trade_levels(
-    signal,
-    entry,
-    candle
-):
-
-    risk = calculate_risk(
-        candle
-    )
-
-    if signal == "BUY":
-
-        sl = entry - risk
-
-        minimum_target = (
-
-            entry
-
-            + risk * MIN_RR
-
-        )
-
+    if close > vwap:
+        reason = "Bullish side: waiting for clean EMA pullback + confirmation"
+    elif close < vwap:
+        reason = "Bearish side: waiting for clean EMA pullback + confirmation"
     else:
-
-        sl = entry + risk
-
-        minimum_target = (
-
-            entry
-
-            - risk * MIN_RR
-
-        )
+        reason = "Waiting for clear direction around VWAP"
 
     return {
-
-        "entry": entry,
-
-        "sl": sl,
-
-        "minimum_target":
-            minimum_target,
-
-        "risk": risk
-
+        "signal": "WAIT",
+        "status": "WAIT",
+        "reason": reason,
+        "entry": None,
+        "sl": None,
+        "target": None
     }
 
 
 # ============================================================
-# RUNNER EXIT CHECK
+# BACKTEST
 # ============================================================
 
-def runner_exit(
-    data,
-    position,
-    signal
-):
-
-    if position < EXIT_CONFIRM_CANDLES:
-
-        return False
-
-    recent = data.iloc[
-        position - EXIT_CONFIRM_CANDLES + 1:
-        position + 1
-    ]
-
-    if len(recent) < EXIT_CONFIRM_CANDLES:
-
-        return False
-
-    if signal == "BUY":
-
-        conditions = (
-
-            recent["Close"]
-
-            < recent["EMA9"]
-
-        )
-
-        return conditions.all()
-
-    if signal == "SELL":
-
-        conditions = (
-
-            recent["Close"]
-
-            > recent["EMA9"]
-
-        )
-
-        return conditions.all()
-
-    return False
-
-
-# ============================================================
-# HISTORICAL BACKTEST
-# ============================================================
-
-@st.cache_data(ttl=30)
-def run_historical_backtest(data):
+def run_backtest(df):
 
     trades = []
 
-    if len(data) < 50:
+    if len(df) < 30:
+        return trades
 
-        return pd.DataFrame()
+    # --------------------------------------------------------
+    # ONE MOVE = ONE TRADE
+    #
+    # After a trade in one direction,
+    # same-direction entries remain locked.
+    #
+    # New trade allowed only after
+    # opposite trend/reset appears.
+    # --------------------------------------------------------
 
-    position = 25
+    direction_lock = None
 
-    last_exit_position = -999
+    position = None
 
-    while position < len(data) - 2:
+    for i in range(20, len(df) - 1):
 
-        # ----------------------------------------------------
-        # COOLDOWN
-        # ----------------------------------------------------
+        row = df.iloc[i]
+        next_row = df.iloc[i + 1]
+
+        # ====================================================
+        # OPEN POSITION MANAGEMENT
+        # ====================================================
+
+        if position is not None:
+
+            side = position["side"]
+
+            entry = position["entry"]
+            sl = position["sl"]
+            target = position["target"]
+
+            exit_price = None
+            exit_reason = None
+
+            # ----------------------------------------------
+            # BUY MANAGEMENT
+            # ----------------------------------------------
+
+            if side == "BUY":
+
+                # Conservative order:
+                # SL checked first if both occur in same candle
+                if row["Low"] <= sl:
+                    exit_price = sl
+                    exit_reason = "STOP LOSS HIT"
+
+                elif row["High"] >= target:
+                    exit_price = target
+                    exit_reason = "TARGET 1:2 HIT"
+
+            # ----------------------------------------------
+            # SELL MANAGEMENT
+            # ----------------------------------------------
+
+            elif side == "SELL":
+
+                if row["High"] >= sl:
+                    exit_price = sl
+                    exit_reason = "STOP LOSS HIT"
+
+                elif row["Low"] <= target:
+                    exit_price = target
+                    exit_reason = "TARGET 1:2 HIT"
+
+            # ----------------------------------------------
+            # CLOSE TRADE
+            # ----------------------------------------------
+
+            if exit_price is not None:
+
+                if side == "BUY":
+                    points = exit_price - entry
+                else:
+                    points = entry - exit_price
+
+                risk = abs(entry - sl)
+
+                r_multiple = (
+                    points / risk
+                    if risk > 0
+                    else 0
+                )
+
+                result = (
+                    "WIN"
+                    if points > 0
+                    else "LOSS"
+                )
+
+                trades.append({
+                    "Signal": side,
+                    "Entry Time": position["entry_time"],
+                    "Exit Time": row.name,
+                    "Entry": round(entry, 2),
+                    "SL": round(sl, 2),
+                    "Target": round(target, 2),
+                    "Exit": round(exit_price, 2),
+                    "Points": round(points, 2),
+                    "R Multiple": round(r_multiple, 2),
+                    "Exit Reason": exit_reason,
+                    "Result": result
+                })
+
+                position = None
+
+            continue
+
+        # ====================================================
+        # RESET LOCK
+        # ====================================================
+
+        if direction_lock == "BUY":
+
+            if (
+                row["Close"] < row["VWAP"] or
+                row["EMA9"] < row["EMA15"]
+            ):
+                direction_lock = None
+
+        elif direction_lock == "SELL":
+
+            if (
+                row["Close"] > row["VWAP"] or
+                row["EMA9"] > row["EMA15"]
+            ):
+                direction_lock = None
+
+        # ====================================================
+        # BUY CONDITIONS
+        # ====================================================
+
+        prev = df.iloc[i - 1]
+
+        bull_trend = (
+            row["Close"] > row["VWAP"] and
+            row["EMA9"] > row["EMA15"] and
+            row["EMA9_Slope"] > 0
+        )
+
+        buy_pullback = (
+            prev["Low"] <= max(prev["EMA9"], prev["EMA15"]) and
+            prev["Close"] >= prev["EMA15"]
+        )
+
+        buy_confirmation = (
+            row["Close"] > row["Open"] and
+            row["Close"] > row["EMA9"]
+        )
+
+        buy_breakout = (
+            row["Close"] > prev["High"]
+        )
 
         if (
-
-            position
-
-            <=
-
-            last_exit_position
-            + COOLDOWN_CANDLES
-
+            direction_lock != "BUY" and
+            bull_trend and
+            buy_pullback and
+            buy_confirmation and
+            buy_breakout
         ):
 
-            position += 1
+            # Entry on next candle open
+            entry = float(next_row["Open"])
 
-            continue
-
-        signal_data = (
-            calculate_signal_at(
-                data,
-                position
+            sl = min(
+                float(prev["Low"]),
+                float(row["Low"])
             )
+
+            risk = entry - sl
+
+            # Avoid zero/tiny risk
+            if risk > 0.01:
+
+                target = entry + (risk * 2)
+
+                position = {
+                    "side": "BUY",
+                    "entry": entry,
+                    "sl": sl,
+                    "target": target,
+                    "entry_time": next_row.name
+                }
+
+                direction_lock = "BUY"
+
+                continue
+
+        # ====================================================
+        # SELL CONDITIONS
+        # ====================================================
+
+        bear_trend = (
+            row["Close"] < row["VWAP"] and
+            row["EMA9"] < row["EMA15"] and
+            row["EMA9_Slope"] < 0
         )
 
-        if signal_data is None:
-
-            position += 1
-
-            continue
-
-        signal = signal_data[
-            "signal"
-        ]
-
-        if signal not in [
-            "BUY",
-            "SELL"
-        ]:
-
-            position += 1
-
-            continue
-
-        # ----------------------------------------------------
-        # ENTRY NEXT CANDLE
-        # ----------------------------------------------------
-
-        entry_position = (
-            position + 1
+        sell_pullback = (
+            prev["High"] >= min(prev["EMA9"], prev["EMA15"]) and
+            prev["Close"] <= prev["EMA15"]
         )
 
-        entry_candle = data.iloc[
-            entry_position
-        ]
-
-        entry = safe_float(
-            entry_candle["Open"]
+        sell_confirmation = (
+            row["Close"] < row["Open"] and
+            row["Close"] < row["EMA9"]
         )
 
-        levels = create_trade_levels(
-
-            signal,
-
-            entry,
-
-            data.iloc[position]
-
+        sell_breakout = (
+            row["Close"] < prev["Low"]
         )
 
-        sl = levels["sl"]
-
-        minimum_target = (
-            levels["minimum_target"]
-        )
-
-        risk = levels["risk"]
-
-        target_2r_hit = False
-
-        exit_found = False
-
-        highest_price = entry
-
-        lowest_price = entry
-
-        end_position = min(
-
-            entry_position
-            + BACKTEST_MAX_HOLD_CANDLES,
-
-            len(data) - 1
-
-        )
-
-        future_position = entry_position
-
-        for future_position in range(
-
-            entry_position,
-
-            end_position + 1
-
+        if (
+            direction_lock != "SELL" and
+            bear_trend and
+            sell_pullback and
+            sell_confirmation and
+            sell_breakout
         ):
 
-            future = data.iloc[
-                future_position
-            ]
+            entry = float(next_row["Open"])
 
-            high = safe_float(
-                future["High"]
+            sl = max(
+                float(prev["High"]),
+                float(row["High"])
             )
 
-            low = safe_float(
-                future["Low"]
-            )
+            risk = sl - entry
 
-            close = safe_float(
-                future["Close"]
-            )
+            if risk > 0.01:
 
-            # ------------------------------------------------
-            # BUY TRADE
-            # ------------------------------------------------
+                target = entry - (risk * 2)
 
-            if signal == "BUY":
+                position = {
+                    "side": "SELL",
+                    "entry": entry,
+                    "sl": sl,
+                    "target": target,
+                    "entry_time": next_row.name
+                }
 
-                highest_price = max(
-                    highest_price,
-                    high
-                )
+                direction_lock = "SELL"
 
-                # Hard SL
-
-                if low <= sl:
-
-                    exit_price = sl
-
-                    exit_reason = (
-                        "STOP LOSS HIT"
-                    )
-
-                    exit_found = True
-
-                    break
-
-                # Minimum 1:2 reached
-
-                if high >= minimum_target:
-
-                    target_2r_hit = True
-
-                # After 1:2 runner logic
-
-                if target_2r_hit:
-
-                    if runner_exit(
-                        data,
-                        future_position,
-                        "BUY"
-                    ):
-
-                        exit_price = close
-
-                        exit_reason = (
-                            "RUNNER EXIT"
-                        )
-
-                        exit_found = True
-
-                        break
-
-            # ------------------------------------------------
-            # SELL TRADE
-            # ------------------------------------------------
-
-            else:
-
-                lowest_price = min(
-                    lowest_price,
-                    low
-                )
-
-                # Hard SL
-
-                if high >= sl:
-
-                    exit_price = sl
-
-                    exit_reason = (
-                        "STOP LOSS HIT"
-                    )
-
-                    exit_found = True
-
-                    break
-
-                # Minimum 1:2 reached
-
-                if low <= minimum_target:
-
-                    target_2r_hit = True
-
-                # After 1:2 runner logic
-
-                if target_2r_hit:
-
-                    if runner_exit(
-                        data,
-                        future_position,
-                        "SELL"
-                    ):
-
-                        exit_price = close
-
-                        exit_reason = (
-                            "RUNNER EXIT"
-                        )
-
-                        exit_found = True
-
-                        break
-
-        # ----------------------------------------------------
-        # TIME EXIT
-        # ----------------------------------------------------
-
-        if not exit_found:
-
-            final_candle = data.iloc[
-                end_position
-            ]
-
-            exit_price = safe_float(
-                final_candle["Close"]
-            )
-
-            exit_reason = (
-                "TIME EXIT"
-            )
-
-            future_position = end_position
-
-        # ----------------------------------------------------
-        # PROFIT POINTS
-        # ----------------------------------------------------
-
-        if signal == "BUY":
-
-            points = (
-                exit_price - entry
-            )
-
-        else:
-
-            points = (
-                entry - exit_price
-            )
-
-        # ----------------------------------------------------
-        # R MULTIPLE
-        # ----------------------------------------------------
-
-        r_multiple = (
-
-            points / risk
-
-            if risk > 0
-
-            else 0
-
-        )
-
-        trades.append({
-
-            "Signal":
-                signal,
-
-            "Entry Time":
-                str(
-                    data.index[
-                        entry_position
-                    ]
-                ),
-
-            "Exit Time":
-                str(
-                    data.index[
-                        future_position
-                    ]
-                ),
-
-            "Entry":
-                round(entry, 2),
-
-            "SL":
-                round(sl, 2),
-
-            "Min Target 1:2":
-                round(
-                    minimum_target,
-                    2
-                ),
-
-            "Exit":
-                round(
-                    exit_price,
-                    2
-                ),
-
-            "Points":
-                round(
-                    points,
-                    2
-                ),
-
-            "R Multiple":
-                round(
-                    r_multiple,
-                    2
-                ),
-
-            "2R Reached":
-                "YES"
-
-                if target_2r_hit
-
-                else "NO",
-
-            "Exit Reason":
-                exit_reason
-
-        })
-
-        # ----------------------------------------------------
-        # ONE MOVE = ONE TRADE
-        # ----------------------------------------------------
-
-        last_exit_position = (
-            future_position
-        )
-
-        position = (
-            future_position + 1
-        )
-
-    if not trades:
-
-        return pd.DataFrame()
-
-    return pd.DataFrame(
-        trades
-    )
+    return trades
 
 
 # ============================================================
-# BACKTEST STATS
+# CHART
 # ============================================================
 
-def get_backtest_stats(backtest_df):
+def create_chart(df, symbol_name):
 
-    if (
-        backtest_df is None
-        or backtest_df.empty
-    ):
+    chart_df = df.tail(375).copy()
 
-        return {
+    fig = go.Figure()
 
-            "total": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": 0,
-            "net_points": 0,
-            "avg_r": 0,
-            "best_r": 0
-
-        }
-
-    total = len(
-        backtest_df
+    fig.add_trace(
+        go.Candlestick(
+            x=chart_df.index,
+            open=chart_df["Open"],
+            high=chart_df["High"],
+            low=chart_df["Low"],
+            close=chart_df["Close"],
+            name="Price"
+        )
     )
 
-    wins = len(
-
-        backtest_df[
-            backtest_df[
-                "Points"
-            ] > 0
-        ]
-
+    fig.add_trace(
+        go.Scatter(
+            x=chart_df.index,
+            y=chart_df["EMA9"],
+            mode="lines",
+            name="EMA 9",
+            line=dict(width=1.5)
+        )
     )
 
-    losses = len(
-
-        backtest_df[
-            backtest_df[
-                "Points"
-            ] < 0
-        ]
-
+    fig.add_trace(
+        go.Scatter(
+            x=chart_df.index,
+            y=chart_df["EMA15"],
+            mode="lines",
+            name="EMA 15",
+            line=dict(width=1.5)
+        )
     )
 
-    win_rate = (
-
-        wins / total * 100
-
-        if total > 0
-
-        else 0
-
+    fig.add_trace(
+        go.Scatter(
+            x=chart_df.index,
+            y=chart_df["VWAP"],
+            mode="lines",
+            name="VWAP",
+            line=dict(width=1.5)
+        )
     )
 
-    net_points = (
-
-        backtest_df[
-            "Points"
-        ].sum()
-
+    fig.update_layout(
+        title=f"{symbol_name} Index Chart",
+        height=620,
+        template="plotly_dark",
+        paper_bgcolor="#111722",
+        plot_bgcolor="#111722",
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0
+        )
     )
 
-    avg_r = (
-
-        backtest_df[
-            "R Multiple"
-        ].mean()
-
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#27313f"
     )
 
-    best_r = (
-
-        backtest_df[
-            "R Multiple"
-        ].max()
-
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="#27313f"
     )
 
-    return {
-
-        "total": total,
-
-        "wins": wins,
-
-        "losses": losses,
-
-        "win_rate": win_rate,
-
-        "net_points": net_points,
-
-        "avg_r": avg_r,
-
-        "best_r": best_r
-
-    }
+    return fig
 
 
 # ============================================================
 # HEADER
 # ============================================================
 
-st.title(
-    "📈 EMA 9/15 + VWAP Scalping Scanner"
-)
+st.title("📈 Personal 9-15 EMA Scalping Scanner")
 
 st.caption(
-    "VWAP Direction → EMA Trend → Pullback → "
-    "Confirmation → One Move One Trade → "
-    "Minimum 1:2 + Runner"
+    "Index Only Strategy | 9 EMA + 15 EMA | "
+    "VWAP = (O+H+L+C)/4 | "
+    "VWAP Direction Filter | EMA Pullback | "
+    "Confirmation Candle | Breakout Entry | "
+    "One Move = One Trade | Fixed 1:2 Risk:Reward"
 )
 
 
@@ -1577,737 +804,74 @@ st.caption(
 # CONTROLS
 # ============================================================
 
-col1, col2, col3 = st.columns(
-    [1, 1, 0.6]
-)
+col1, col2, col3 = st.columns([1, 1, 0.55])
 
 with col1:
-
-    index_name = st.selectbox(
-
+    selected_index = st.selectbox(
         "Select Index",
-
-        list(
-            INDEX_CONFIG.keys()
-        ),
-
+        list(INDEX_MAP.keys()),
         index=0
-
     )
 
 with col2:
-
-    timeframe = st.selectbox(
-
+    selected_tf = st.selectbox(
         "Select Timeframe",
-
-        list(
-            TIMEFRAME_CONFIG.keys()
-        ),
-
+        list(TIMEFRAME_MAP.keys()),
         index=2
-
     )
 
 with col3:
-
     st.write("")
-
-    if st.button(
-        "🔄 Refresh"
-    ):
-
-        get_market_data.clear()
-
-        run_historical_backtest.clear()
-
-        st.rerun()
+    st.write("")
+    refresh = st.button("🔄 Refresh")
 
 
 # ============================================================
 # LOAD DATA
 # ============================================================
 
-symbol = (
-    INDEX_CONFIG[
-        index_name
-    ]["symbol"]
-)
+symbol = INDEX_MAP[selected_index]
 
-df = get_market_data(
+interval, period = TIMEFRAME_MAP[selected_tf]
+
+df = load_data(
     symbol,
-    timeframe
+    interval,
+    period
 )
 
+
+# ============================================================
+# NO DATA
+# ============================================================
 
 if df.empty:
 
     st.error(
-        "Market data load नहीं हो पाया।"
+        "Market data is currently unavailable. "
+        "Please refresh and try again."
     )
 
     st.stop()
 
 
 # ============================================================
-# CALCULATE INDICATORS
+# INDICATORS
 # ============================================================
 
-data = calculate_indicators(
-    df
-)
+df = add_indicators(df)
 
-signal_data = get_signal(
-    data
-)
+signal = get_signal(df)
 
-
-if signal_data is None:
-
-    st.warning(
-        "Signal के लिए पर्याप्त data नहीं है।"
-    )
-
-    st.stop()
-
-
-signal = (
-    signal_data["signal"]
-)
-
-price = (
-    signal_data["price"]
-)
-
-ema9 = (
-    signal_data["ema9"]
-)
-
-ema15 = (
-    signal_data["ema15"]
-)
-
-vwap = (
-    signal_data["vwap"]
-)
-
-market_direction = (
-    signal_data[
-        "market_direction"
-    ]
-)
-
-
-# ============================================================
-# SIGNAL COLOR
-# ============================================================
-
-if signal == "BUY":
-
-    signal_class = (
-        "signal-buy"
-    )
-
-elif signal == "SELL":
-
-    signal_class = (
-        "signal-sell"
-    )
-
-else:
-
-    signal_class = (
-        "signal-wait"
-    )
+last = df.iloc[-1]
 
 
 # ============================================================
 # CURRENT SIGNAL
 # ============================================================
 
-st.markdown(
-    "## 🎯 Current Market Signal"
-)
+st.header("🎯 Current Signal")
 
-c1, c2, c3 = st.columns(3)
+signal_col, status_col = st.columns(2)
 
-with c1:
-
-    st.markdown(
-
-        metric_box(
-
-            "Signal",
-
-            signal,
-
-            signal_class
-
-        ),
-
-        unsafe_allow_html=True
-
-    )
-
-with c2:
-
-    direction_class = (
-
-        "signal-buy"
-
-        if market_direction == "BULLISH"
-
-        else "signal-sell"
-
-        if market_direction == "BEARISH"
-
-        else "signal-wait"
-
-    )
-
-    st.markdown(
-
-        metric_box(
-
-            "VWAP Direction",
-
-            market_direction,
-
-            direction_class
-
-        ),
-
-        unsafe_allow_html=True
-
-    )
-
-with c3:
-
-    st.markdown(
-
-        metric_box(
-
-            "Current Price",
-
-            format_number(price)
-
-        ),
-
-        unsafe_allow_html=True
-
-    )
-
-
-c1, c2, c3 = st.columns(3)
-
-with c1:
-
-    st.markdown(
-
-        metric_box(
-
-            "EMA 9",
-
-            format_number(ema9)
-
-        ),
-
-        unsafe_allow_html=True
-
-    )
-
-with c2:
-
-    st.markdown(
-
-        metric_box(
-
-            "EMA 15",
-
-            format_number(ema15)
-
-        ),
-
-        unsafe_allow_html=True
-
-    )
-
-with c3:
-
-    st.markdown(
-
-        metric_box(
-
-            "VWAP",
-
-            format_number(vwap)
-
-        ),
-
-        unsafe_allow_html=True
-
-    )
-
-
-# ============================================================
-# TRADE LEVELS
-# ============================================================
-
-levels = None
-
-if signal in [
-    "BUY",
-    "SELL"
-]:
-
-    levels = create_trade_levels(
-
-        signal,
-
-        price,
-
-        data.iloc[-1]
-
-    )
-
-    st.markdown(
-        "## 📌 Trade Plan"
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    with c1:
-
-        st.metric(
-            "Entry",
-            format_number(
-                levels["entry"]
-            )
-        )
-
-    with c2:
-
-        st.metric(
-            "Stop Loss",
-            format_number(
-                levels["sl"]
-            )
-        )
-
-    with c3:
-
-        st.metric(
-            "Minimum Target",
-            format_number(
-                levels[
-                    "minimum_target"
-                ]
-            )
-        )
-
-    with c4:
-
-        st.metric(
-            "Risk : Reward",
-            "1 : 2 Minimum"
-        )
-
-    st.info(
-        "1:2 केवल minimum target है। "
-        "Trend strong रहने पर EMA 9 trailing logic से "
-        "trade 1:3, 1:4, 1:6, 1:7 या अधिक चल सकता है।"
-    )
-
-
-# ============================================================
-# SIGNAL CONDITION
-# ============================================================
-
-st.markdown(
-    "### Signal Condition"
-)
-
-st.write(
-    signal_data["reason"]
-)
-
-
-# ============================================================
-# CHART
-# ============================================================
-
-st.markdown(
-    "## 📊 Index Chart"
-)
-
-chart_data = data.tail(
-    200
-).copy()
-
-fig = go.Figure()
-
-
-# ============================================================
-# CANDLESTICK
-# ============================================================
-
-fig.add_trace(
-
-    go.Candlestick(
-
-        x=chart_data.index,
-
-        open=chart_data["Open"],
-
-        high=chart_data["High"],
-
-        low=chart_data["Low"],
-
-        close=chart_data["Close"],
-
-        name="Price"
-
-    )
-
-)
-
-
-# ============================================================
-# EMA 9
-# ============================================================
-
-fig.add_trace(
-
-    go.Scatter(
-
-        x=chart_data.index,
-
-        y=chart_data["EMA9"],
-
-        mode="lines",
-
-        name="EMA 9",
-
-        line=dict(
-            width=2
-        )
-
-    )
-
-)
-
-
-# ============================================================
-# EMA 15
-# ============================================================
-
-fig.add_trace(
-
-    go.Scatter(
-
-        x=chart_data.index,
-
-        y=chart_data["EMA15"],
-
-        mode="lines",
-
-        name="EMA 15",
-
-        line=dict(
-            width=2
-        )
-
-    )
-
-)
-
-
-# ============================================================
-# VWAP
-# ============================================================
-
-fig.add_trace(
-
-    go.Scatter(
-
-        x=chart_data.index,
-
-        y=chart_data["VWAP"],
-
-        mode="lines",
-
-        name="VWAP",
-
-        line=dict(
-            width=2
-        )
-
-    )
-
-)
-
-
-# ============================================================
-# CURRENT TRADE LEVELS
-# ============================================================
-
-if levels is not None:
-
-    fig.add_hline(
-
-        y=levels["entry"],
-
-        line_dash="dot",
-
-        annotation_text=(
-            f"{signal} ENTRY"
-        )
-
-    )
-
-    fig.add_hline(
-
-        y=levels["sl"],
-
-        line_dash="dash",
-
-        annotation_text="SL"
-
-    )
-
-    fig.add_hline(
-
-        y=levels[
-            "minimum_target"
-        ],
-
-        line_dash="dash",
-
-        annotation_text="MINIMUM 1:2"
-
-    )
-
-    marker_symbol = (
-
-        "triangle-up"
-
-        if signal == "BUY"
-
-        else "triangle-down"
-
-    )
-
-    fig.add_trace(
-
-        go.Scatter(
-
-            x=[
-                chart_data.index[-1]
-            ],
-
-            y=[
-                price
-            ],
-
-            mode="markers+text",
-
-            marker=dict(
-
-                size=14,
-
-                symbol=marker_symbol
-
-            ),
-
-            text=[
-                signal
-            ],
-
-            textposition="top center",
-
-            name=signal
-
-        )
-
-    )
-
-
-fig.update_layout(
-
-    height=650,
-
-    margin=dict(
-        l=10,
-        r=10,
-        t=30,
-        b=10
-    ),
-
-    template="plotly_dark",
-
-    xaxis_rangeslider_visible=False,
-
-    legend=dict(
-        orientation="h"
-    )
-
-)
-
-
-st.plotly_chart(
-
-    fig,
-
-    use_container_width=True
-
-)
-
-
-# ============================================================
-# STRATEGY RULES
-# ============================================================
-
-st.markdown(
-    "## 📋 Strategy Rules"
-)
-
-st.markdown("""
-
-### BUY
-
-1. Price **VWAP के ऊपर**
-2. EMA 9 **EMA 15 के ऊपर**
-3. Market EMA 9 / EMA zone तक pullback करे
-4. Bullish confirmation candle बने
-5. Previous candle high के ऊपर confirmation मिले
-6. VWAP के पास setup को प्राथमिकता
-7. एक move में केवल एक trade
-8. Minimum target 1:2
-9. उसके बाद EMA 9 के नीचे लगातार 2 candles मिलने पर runner exit
-
-### SELL
-
-1. Price **VWAP के नीचे**
-2. EMA 9 **EMA 15 के नीचे**
-3. Market EMA 9 / EMA zone तक pullback करे
-4. Bearish confirmation candle बने
-5. Previous candle low के नीचे confirmation मिले
-6. VWAP के पास setup को प्राथमिकता
-7. एक move में केवल एक trade
-8. Minimum target 1:2
-9. उसके बाद EMA 9 के ऊपर लगातार 2 candles मिलने पर runner exit
-
-""")
-
-
-# ============================================================
-# HISTORICAL BACKTEST
-# ============================================================
-
-st.markdown(
-    "## 📉 Historical Backtest"
-)
-
-backtest_df = (
-    run_historical_backtest(
-        data
-    )
-)
-
-stats = get_backtest_stats(
-    backtest_df
-)
-
-
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-
-    st.metric(
-        "Total Trades",
-        stats["total"]
-    )
-
-with c2:
-
-    st.metric(
-        "Wins",
-        stats["wins"]
-    )
-
-with c3:
-
-    st.metric(
-        "Losses",
-        stats["losses"]
-    )
-
-with c4:
-
-    st.metric(
-        "Win Rate",
-        f"{stats['win_rate']:.1f}%"
-    )
-
-
-c1, c2, c3 = st.columns(3)
-
-with c1:
-
-    st.metric(
-        "Net Points",
-        f"{stats['net_points']:.2f}"
-    )
-
-with c2:
-
-    st.metric(
-        "Average R",
-        f"{stats['avg_r']:.2f}R"
-    )
-
-with c3:
-
-    st.metric(
-        "Best Trade",
-        f"{stats['best_r']:.2f}R"
-    )
-
-
-# ============================================================
-# BACKTEST TABLE
-# ============================================================
-
-st.markdown(
-    "### Recent Backtest Trades"
-)
-
-if backtest_df.empty:
-
-    st.info(
-        "Historical trades नहीं मिले।"
-    )
-
-else:
-
-    st.dataframe(
-
-        backtest_df.iloc[
-            ::-1
-        ].head(20),
-
-        use_container_width=True
-
-    )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.caption(
-    "VWAP = Direction | EMA 9/15 = Trend | "
-    "Pullback + Confirmation = Entry | "
-    "One Move = One Trade | "
-    "Minimum 1:2 + Runner"
-)
+with signal_
