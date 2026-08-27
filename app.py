@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 # ============================================================
 
 st.set_page_config(
-    page_title="Personal Scalping Scanner",
+    page_title="Personal 9-15 EMA Scalping Scanner",
     page_icon="📈",
     layout="wide"
 )
@@ -71,13 +71,13 @@ st.markdown("""
     font-weight: 800;
 }
 
-.signal-medium {
-    color: #f3c969;
+.signal-strong {
+    color: #48d597;
     font-weight: 800;
 }
 
-.signal-strong {
-    color: #48d597;
+.signal-medium {
+    color: #f3c969;
     font-weight: 800;
 }
 
@@ -100,10 +100,11 @@ if "last_trade_signal_time" not in st.session_state:
 
 
 # ============================================================
-# CONSTANTS
+# INDEX CONFIG
 # ============================================================
 
 INDEX_CONFIG = {
+
     "NIFTY 50": {
         "yahoo": "^NSEI",
         "nse": "NIFTY",
@@ -121,8 +122,13 @@ INDEX_CONFIG = {
         "nse": None,
         "strike_step": 100
     }
+
 }
 
+
+# ============================================================
+# TIMEFRAME CONFIG
+# ============================================================
 
 TIMEFRAME_CONFIG = {
 
@@ -173,22 +179,39 @@ TIMEFRAME_CONFIG = {
         "period": "6mo",
         "resample": None
     }
+
 }
 
 
 # ============================================================
-# SETTINGS
+# STRATEGY SETTINGS
 # ============================================================
 
-MIN_TRADE_SCORE = 5
-STRONG_TRADE_SCORE = 7
-
-MIN_RISK_POINTS = 8
-MAX_RISK_POINTS = 15
-
-RISK_REWARD = 2
+RISK_REWARD = 2.0
 
 BACKTEST_MAX_HOLD_CANDLES = 30
+
+EMA_SLOPE_LOOKBACK = 3
+
+MIN_EMA_SEPARATION_PCT = 0.0008
+
+MIN_SLOPE_PCT = 0.0003
+
+PULLBACK_LOOKBACK = 3
+
+MAX_ENTRY_DISTANCE_PCT = 0.0025
+
+MIN_BODY_TO_RANGE = 0.45
+
+MIN_STRONG_BODY_TO_RANGE = 0.60
+
+MAX_OPPOSITE_WICK_TO_BODY = 1.2
+
+REJECTION_WICK_MULTIPLIER = 1.2
+
+MIN_RISK_POINTS = 5
+
+MAX_RISK_POINTS = 30
 
 
 # ============================================================
@@ -221,6 +244,7 @@ def format_number(value, digits=2):
 
     try:
         return f"{float(value):.{digits}f}"
+
     except Exception:
         return "-"
 
@@ -261,25 +285,15 @@ def get_market_data(symbol, timeframe):
 
         df = df.copy()
 
-        # ----------------------------------------------------
-        # REMOVE TIMEZONE
-        # ----------------------------------------------------
-
         if isinstance(df.index, pd.DatetimeIndex):
 
             if df.index.tz is not None:
                 df.index = df.index.tz_localize(None)
 
-        # ----------------------------------------------------
-        # RESAMPLE
-        # ----------------------------------------------------
-
         if config["resample"] is not None:
 
             df = (
-                df.resample(
-                    config["resample"]
-                )
+                df.resample(config["resample"])
                 .agg({
                     "Open": "first",
                     "High": "max",
@@ -304,9 +318,7 @@ def calculate_indicators(df):
 
     data = df.copy()
 
-    # --------------------------------------------------------
     # EMA 9
-    # --------------------------------------------------------
 
     data["EMA9"] = (
         data["Close"]
@@ -317,9 +329,7 @@ def calculate_indicators(df):
         .mean()
     )
 
-    # --------------------------------------------------------
     # EMA 15
-    # --------------------------------------------------------
 
     data["EMA15"] = (
         data["Close"]
@@ -330,9 +340,7 @@ def calculate_indicators(df):
         .mean()
     )
 
-    # --------------------------------------------------------
-    # TYPICAL PRICE
-    # --------------------------------------------------------
+    # Typical Price
 
     data["TypicalPrice"] = (
         data["High"]
@@ -340,15 +348,11 @@ def calculate_indicators(df):
         + data["Close"]
     ) / 3
 
-    # --------------------------------------------------------
-    # VWAP
-    #
-    # RESET EVERY DAY
-    # --------------------------------------------------------
+    # VWAP - daily reset
 
-    data["TradeDate"] = pd.to_datetime(
-        data.index
-    ).date
+    data["TradeDate"] = (
+        pd.to_datetime(data.index).date
+    )
 
     volume = (
         data["Volume"]
@@ -356,26 +360,21 @@ def calculate_indicators(df):
         .fillna(1)
     )
 
-    tp_volume = (
-        data["TypicalPrice"] *
-        volume
-    )
-
-    cumulative_tp_volume = (
-        tp_volume
-        .groupby(data["TradeDate"])
-        .cumsum()
-    )
-
-    cumulative_volume = (
-        volume
-        .groupby(data["TradeDate"])
-        .cumsum()
-    )
-
     data["VWAP"] = (
-        cumulative_tp_volume /
-        cumulative_volume
+
+        (
+            data["TypicalPrice"]
+            * volume
+        )
+        .groupby(data["TradeDate"])
+        .cumsum()
+
+        /
+
+        volume
+        .groupby(data["TradeDate"])
+        .cumsum()
+
     )
 
     data["VWAP"] = (
@@ -383,46 +382,120 @@ def calculate_indicators(df):
         .fillna(data["TypicalPrice"])
     )
 
-    # --------------------------------------------------------
-    # CANDLE BODY
-    # --------------------------------------------------------
+    # Candle values
 
     data["Body"] = (
-        data["Close"] -
-        data["Open"]
+        data["Close"]
+        - data["Open"]
     ).abs()
 
-    # --------------------------------------------------------
-    # RANGE
-    # --------------------------------------------------------
-
     data["Range"] = (
-        data["High"] -
-        data["Low"]
+        data["High"]
+        - data["Low"]
     )
 
-    # --------------------------------------------------------
-    # UPPER WICK
-    # --------------------------------------------------------
-
     data["UpperWick"] = (
-        data["High"] -
+
+        data["High"]
+
+        -
+
         data[
             ["Open", "Close"]
         ].max(axis=1)
+
     )
 
-    # --------------------------------------------------------
-    # LOWER WICK
-    # --------------------------------------------------------
-
     data["LowerWick"] = (
+
         data[
             ["Open", "Close"]
         ].min(axis=1)
+
         -
+
         data["Low"]
+
     )
+
+    # ATR
+
+    previous_close = (
+        data["Close"].shift(1)
+    )
+
+    tr1 = (
+        data["High"]
+        - data["Low"]
+    )
+
+    tr2 = (
+        data["High"]
+        - previous_close
+    ).abs()
+
+    tr3 = (
+        data["Low"]
+        - previous_close
+    ).abs()
+
+    true_range = (
+        pd.concat(
+            [tr1, tr2, tr3],
+            axis=1
+        )
+        .max(axis=1)
+    )
+
+    data["ATR"] = (
+        true_range
+        .rolling(14)
+        .mean()
+    )
+
+    # EMA slopes
+
+    data["EMA9_Slope"] = (
+        data["EMA9"]
+        - data["EMA9"].shift(
+            EMA_SLOPE_LOOKBACK
+        )
+    )
+
+    data["EMA15_Slope"] = (
+        data["EMA15"]
+        - data["EMA15"].shift(
+            EMA_SLOPE_LOOKBACK
+        )
+    )
+
+    # EMA separation %
+
+    data["EMA_Separation_Pct"] = (
+
+        (
+            data["EMA9"]
+            - data["EMA15"]
+        ).abs()
+
+        /
+
+        data["Close"]
+
+    )
+
+    # Body / range ratio
+
+    data["Body_Range_Ratio"] = (
+
+        data["Body"]
+
+        /
+
+        data["Range"]
+        .replace(0, np.nan)
+
+    ).fillna(0)
 
     return data
 
@@ -435,29 +508,24 @@ def get_nse_session():
 
     session = requests.Session()
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
+    session.headers.update({
+
+        "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 "
             "(KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+            "Chrome/120.0.0.0 Safari/537.36",
 
-        "Accept": (
-            "application/json, text/plain, */*"
-        ),
+        "Accept":
+            "application/json, text/plain, */*",
 
-        "Accept-Language": (
-            "en-US,en;q=0.9"
-        ),
+        "Accept-Language":
+            "en-US,en;q=0.9",
 
-        "Referer": (
+        "Referer":
             "https://www.nseindia.com/"
-        )
-    }
 
-    session.headers.update(headers)
+    })
 
     try:
 
@@ -511,7 +579,7 @@ def get_option_chain(index_name):
 
 
 # ============================================================
-# EXPIRY
+# NEAREST EXPIRY
 # ============================================================
 
 def get_nearest_expiry(option_chain):
@@ -529,7 +597,7 @@ def get_nearest_expiry(option_chain):
 
         today = datetime.now().date()
 
-        valid_dates = []
+        valid = []
 
         for expiry in expiry_dates:
 
@@ -539,13 +607,12 @@ def get_nearest_expiry(option_chain):
                     datetime.strptime(
                         expiry,
                         "%d-%b-%Y"
-                    )
-                    .date()
+                    ).date()
                 )
 
                 if expiry_date >= today:
 
-                    valid_dates.append(
+                    valid.append(
                         (
                             expiry_date,
                             expiry
@@ -555,13 +622,13 @@ def get_nearest_expiry(option_chain):
             except Exception:
                 pass
 
-        if valid_dates:
+        if valid:
 
-            valid_dates.sort(
+            valid.sort(
                 key=lambda x: x[0]
             )
 
-            return valid_dates[0][1]
+            return valid[0][1]
 
         return expiry_dates[0]
 
@@ -570,7 +637,7 @@ def get_nearest_expiry(option_chain):
 
 
 # ============================================================
-# FIND ATM / ITM OPTION
+# OPTION CONTRACT
 # ============================================================
 
 def find_option_contract(
@@ -591,51 +658,54 @@ def find_option_contract(
             .get("data", [])
         )
 
-        expiry = get_nearest_expiry(
-            option_chain
+        expiry = (
+            get_nearest_expiry(
+                option_chain
+            )
         )
 
         if expiry is None:
             return None
 
-        strike_step = (
+        step = (
             INDEX_CONFIG[index_name]
             ["strike_step"]
         )
 
-        atm_strike = (
+        atm = (
             round(
-                spot_price /
-                strike_step
+                spot_price / step
             )
-            * strike_step
+            * step
         )
 
-        # ----------------------------------------------------
-        # ATM + ITM ONLY
-        # ----------------------------------------------------
+        # ITM first, ATM second
 
         if option_type == "CE":
 
-            preferred_strikes = [
-                atm_strike,
-                atm_strike - strike_step,
-                atm_strike - (
-                    2 * strike_step
-                )
+            preferred = [
+
+                atm - step,
+
+                atm,
+
+                atm - (2 * step)
+
             ]
 
         else:
 
-            preferred_strikes = [
-                atm_strike,
-                atm_strike + strike_step,
-                atm_strike + (
-                    2 * strike_step
-                )
+            preferred = [
+
+                atm + step,
+
+                atm,
+
+                atm + (2 * step)
+
             ]
 
-        available = []
+        available = {}
 
         for row in records:
 
@@ -651,15 +721,9 @@ def find_option_contract(
                 row.get("strikePrice")
             )
 
-            option_data = row.get(
-                option_type,
-                {}
-            )
-
             premium = safe_float(
-                option_data.get(
-                    "lastPrice"
-                )
+                row[option_type]
+                .get("lastPrice")
             )
 
             if (
@@ -669,53 +733,32 @@ def find_option_contract(
             ):
                 continue
 
-            available.append({
+            available[strike] = premium
 
-                "strike": strike,
+        for strike in preferred:
 
-                "premium": premium,
+            if strike in available:
 
-                "expiry": expiry,
+                return {
 
-                "option_type": option_type,
+                    "option_type":
+                        option_type,
 
-                "data": option_data
+                    "strike":
+                        strike,
 
-            })
+                    "premium":
+                        available[strike],
 
-        if not available:
-            return None
+                    "expiry":
+                        expiry,
 
-        # ----------------------------------------------------
-        # PREFERRED ATM / ITM
-        # ----------------------------------------------------
+                    "symbol":
+                        f"{index_name} "
+                        f"{int(strike)} "
+                        f"{option_type}"
 
-        for strike in preferred_strikes:
-
-            for item in available:
-
-                if item["strike"] == strike:
-
-                    return {
-
-                        "option_type":
-                            option_type,
-
-                        "strike":
-                            item["strike"],
-
-                        "premium":
-                            item["premium"],
-
-                        "expiry":
-                            expiry,
-
-                        "symbol":
-                            f"{index_name} "
-                            f"{int(item['strike'])} "
-                            f"{option_type}"
-
-                    }
+                }
 
         return None
 
@@ -724,7 +767,7 @@ def find_option_contract(
 
 
 # ============================================================
-# FIND EXACT RUNNING OPTION
+# EXACT OPTION CONTRACT
 # ============================================================
 
 def find_exact_option_contract(
@@ -747,25 +790,25 @@ def find_exact_option_contract(
 
         for row in records:
 
-            row_strike = safe_float(
-                row.get("strikePrice")
-            )
-
             if (
-                row_strike != strike
-                or row.get("expiryDate") != expiry
-                or option_type not in row
+                safe_float(
+                    row.get("strikePrice")
+                ) != strike
             ):
                 continue
 
-            option_data = row[
-                option_type
-            ]
+            if (
+                row.get("expiryDate")
+                != expiry
+            ):
+                continue
+
+            if option_type not in row:
+                continue
 
             premium = safe_float(
-                option_data.get(
-                    "lastPrice"
-                )
+                row[option_type]
+                .get("lastPrice")
             )
 
             if premium is None:
@@ -794,269 +837,716 @@ def find_exact_option_contract(
 
 
 # ============================================================
+# CANDLE PATTERNS
+# ============================================================
+
+def is_bullish_rejection(row):
+
+    body = safe_float(
+        row["Body"],
+        0
+    )
+
+    lower_wick = safe_float(
+        row["LowerWick"],
+        0
+    )
+
+    upper_wick = safe_float(
+        row["UpperWick"],
+        0
+    )
+
+    if body <= 0:
+        return False
+
+    return (
+
+        safe_float(row["Close"])
+        >
+        safe_float(row["Open"])
+
+        and
+
+        lower_wick
+        >=
+        body * REJECTION_WICK_MULTIPLIER
+
+        and
+
+        lower_wick > upper_wick
+
+    )
+
+
+def is_bearish_rejection(row):
+
+    body = safe_float(
+        row["Body"],
+        0
+    )
+
+    upper_wick = safe_float(
+        row["UpperWick"],
+        0
+    )
+
+    lower_wick = safe_float(
+        row["LowerWick"],
+        0
+    )
+
+    if body <= 0:
+        return False
+
+    return (
+
+        safe_float(row["Close"])
+        <
+        safe_float(row["Open"])
+
+        and
+
+        upper_wick
+        >=
+        body * REJECTION_WICK_MULTIPLIER
+
+        and
+
+        upper_wick > lower_wick
+
+    )
+
+
+def is_bullish_engulfing(previous, current):
+
+    return (
+
+        safe_float(current["Close"])
+        >
+        safe_float(current["Open"])
+
+        and
+
+        safe_float(previous["Close"])
+        <
+        safe_float(previous["Open"])
+
+        and
+
+        safe_float(current["Close"])
+        >=
+        safe_float(previous["Open"])
+
+        and
+
+        safe_float(current["Open"])
+        <=
+        safe_float(previous["Close"])
+
+    )
+
+
+def is_bearish_engulfing(previous, current):
+
+    return (
+
+        safe_float(current["Close"])
+        <
+        safe_float(current["Open"])
+
+        and
+
+        safe_float(previous["Close"])
+        >
+        safe_float(previous["Open"])
+
+        and
+
+        safe_float(current["Close"])
+        <=
+        safe_float(previous["Open"])
+
+        and
+
+        safe_float(current["Open"])
+        >=
+        safe_float(previous["Close"])
+
+    )
+
+
+# ============================================================
 # SIGNAL CALCULATION
 # ============================================================
 
 def calculate_signal_at(data, position):
 
-    if position < 20:
+    minimum_required = max(
+        25,
+        EMA_SLOPE_LOOKBACK + 15
+    )
+
+    if position < minimum_required:
         return None
 
-    last = data.iloc[position]
-    previous = data.iloc[position - 1]
+    current = data.iloc[position]
 
-    price = safe_float(last["Close"])
+    previous = data.iloc[
+        position - 1
+    ]
 
-    ema9 = safe_float(last["EMA9"])
-    ema15 = safe_float(last["EMA15"])
-    vwap = safe_float(last["VWAP"])
-
-    open_price = safe_float(
-        last["Open"]
+    price = safe_float(
+        current["Close"]
     )
 
-    previous_ema9 = safe_float(
-        previous["EMA9"]
+    ema9 = safe_float(
+        current["EMA9"]
     )
 
-    previous_ema15 = safe_float(
-        previous["EMA15"]
+    ema15 = safe_float(
+        current["EMA15"]
     )
 
-    body = safe_float(
-        last["Body"],
+    vwap = safe_float(
+        current["VWAP"]
+    )
+
+    atr = safe_float(
+        current["ATR"],
         0
     )
 
-    upper_wick = safe_float(
-        last["UpperWick"],
+    ema9_slope = safe_float(
+        current["EMA9_Slope"],
         0
     )
 
-    lower_wick = safe_float(
-        last["LowerWick"],
+    ema15_slope = safe_float(
+        current["EMA15_Slope"],
         0
     )
 
-    # --------------------------------------------------------
+    separation_pct = safe_float(
+        current["EMA_Separation_Pct"],
+        0
+    )
+
+    body_ratio = safe_float(
+        current["Body_Range_Ratio"],
+        0
+    )
+
+    current_range = safe_float(
+        current["Range"],
+        0
+    )
+
+    # ========================================================
     # TREND
-    # --------------------------------------------------------
+    # ========================================================
 
     bullish_trend = (
-
-        price > ema9
-
-        and
-
         ema9 > ema15
-
-        and
-
-        price > vwap
-
+        and price > ema15
     )
 
     bearish_trend = (
-
-        price < ema9
-
-        and
-
         ema9 < ema15
+        and price < ema15
+    )
 
-        and
+    # ========================================================
+    # SLOPE
+    # ========================================================
 
-        price < vwap
+    ema9_slope_pct = (
+
+        ema9_slope / ema9
+
+        if ema9 != 0
+
+        else 0
 
     )
 
-    # --------------------------------------------------------
-    # EMA CROSS
-    # --------------------------------------------------------
+    ema15_slope_pct = (
 
-    bullish_cross = (
+        ema15_slope / ema15
 
-        previous_ema9 <= previous_ema15
+        if ema15 != 0
 
-        and
-
-        ema9 > ema15
+        else 0
 
     )
 
-    bearish_cross = (
+    bullish_slope = (
 
-        previous_ema9 >= previous_ema15
+        ema9_slope_pct
+        >=
+        MIN_SLOPE_PCT
 
         and
 
-        ema9 < ema15
+        ema15_slope_pct
+        >=
+        MIN_SLOPE_PCT * 0.50
 
     )
 
-    # --------------------------------------------------------
-    # CANDLE
-    # --------------------------------------------------------
+    bearish_slope = (
+
+        ema9_slope_pct
+        <=
+        -MIN_SLOPE_PCT
+
+        and
+
+        ema15_slope_pct
+        <=
+        -MIN_SLOPE_PCT * 0.50
+
+    )
+
+    # ========================================================
+    # SIDEWAYS FILTER
+    # ========================================================
+
+    enough_separation = (
+        separation_pct
+        >=
+        MIN_EMA_SEPARATION_PCT
+    )
+
+    # ========================================================
+    # PULLBACK / EMA TOUCH
+    # ========================================================
+
+    lookback_start = max(
+        0,
+        position - PULLBACK_LOOKBACK
+    )
+
+    pullback_data = data.iloc[
+        lookback_start:
+        position + 1
+    ]
+
+    bullish_touch = False
+    bearish_touch = False
+
+    for _, candle in pullback_data.iterrows():
+
+        candle_low = safe_float(
+            candle["Low"]
+        )
+
+        candle_high = safe_float(
+            candle["High"]
+        )
+
+        candle_ema9 = safe_float(
+            candle["EMA9"]
+        )
+
+        candle_ema15 = safe_float(
+            candle["EMA15"]
+        )
+
+        if (
+
+            candle_low <= candle_ema9
+            and
+            candle_high >= candle_ema15
+
+        ):
+
+            bullish_touch = True
+            bearish_touch = True
+
+        elif (
+
+            candle_low <= candle_ema9
+            and
+            candle_high >= candle_ema9
+
+        ):
+
+            bullish_touch = True
+            bearish_touch = True
+
+    # ========================================================
+    # CANDLE CONFIRMATION
+    # ========================================================
 
     bullish_candle = (
-        price > open_price
+
+        price
+        >
+        safe_float(current["Open"])
+
+        and
+
+        body_ratio
+        >=
+        MIN_BODY_TO_RANGE
+
     )
 
     bearish_candle = (
-        price < open_price
-    )
 
-    # --------------------------------------------------------
-    # REJECTION
-    # --------------------------------------------------------
-
-    bullish_rejection = (
-
-        lower_wick > body * 1.2
+        price
+        <
+        safe_float(current["Open"])
 
         and
 
-        price > open_price
+        body_ratio
+        >=
+        MIN_BODY_TO_RANGE
 
+    )
+
+    bullish_rejection = (
+        is_bullish_rejection(
+            current
+        )
     )
 
     bearish_rejection = (
+        is_bearish_rejection(
+            current
+        )
+    )
 
-        upper_wick > body * 1.2
+    bullish_engulfing = (
+        is_bullish_engulfing(
+            previous,
+            current
+        )
+    )
+
+    bearish_engulfing = (
+        is_bearish_engulfing(
+            previous,
+            current
+        )
+    )
+
+    strong_bullish = (
+
+        bullish_candle
 
         and
 
-        price < open_price
+        body_ratio
+        >=
+        MIN_STRONG_BODY_TO_RANGE
+
+        and
+
+        safe_float(
+            current["UpperWick"],
+            0
+        )
+
+        <=
+
+        safe_float(
+            current["Body"],
+            0
+        )
+
+        *
+        MAX_OPPOSITE_WICK_TO_BODY
 
     )
 
-    # --------------------------------------------------------
-    # BREAKOUT
-    # --------------------------------------------------------
+    strong_bearish = (
 
-    recent_high = (
-        data["High"]
-        .iloc[
-            position - 5:
-            position
-        ]
-        .max()
+        bearish_candle
+
+        and
+
+        body_ratio
+        >=
+        MIN_STRONG_BODY_TO_RANGE
+
+        and
+
+        safe_float(
+            current["LowerWick"],
+            0
+        )
+
+        <=
+
+        safe_float(
+            current["Body"],
+            0
+        )
+
+        *
+        MAX_OPPOSITE_WICK_TO_BODY
+
     )
 
-    recent_low = (
-        data["Low"]
-        .iloc[
-            position - 5:
-            position
-        ]
-        .min()
+    bullish_confirmation = (
+
+        bullish_rejection
+
+        or
+
+        bullish_engulfing
+
+        or
+
+        strong_bullish
+
     )
 
-    bullish_breakout = (
-        price > recent_high
+    bearish_confirmation = (
+
+        bearish_rejection
+
+        or
+
+        bearish_engulfing
+
+        or
+
+        strong_bearish
+
     )
 
-    bearish_breakdown = (
-        price < recent_low
+    # ========================================================
+    # LATE ENTRY FILTER
+    # ========================================================
+
+    distance_from_ema9 = (
+
+        abs(
+            price - ema9
+        )
+
+        /
+
+        price
+
+        if price != 0
+
+        else 999
+
     )
 
-    # --------------------------------------------------------
-    # SCORE
-    # --------------------------------------------------------
+    not_late_entry = (
+        distance_from_ema9
+        <=
+        MAX_ENTRY_DISTANCE_PCT
+    )
 
-    call_score = 0
-    put_score = 0
+    # ========================================================
+    # VWAP EXTRA FILTER
+    # ========================================================
 
-    if bullish_trend:
-        call_score += 3
+    bullish_vwap = (
+        price >= vwap
+    )
 
-    if bearish_trend:
-        put_score += 3
+    bearish_vwap = (
+        price <= vwap
+    )
 
-    if bullish_candle:
-        call_score += 1
+    # ========================================================
+    # FINAL CALL
+    # ========================================================
 
-    if bearish_candle:
-        put_score += 1
+    call_valid = (
 
-    if bullish_cross:
-        call_score += 2
+        bullish_trend
 
-    if bearish_cross:
-        put_score += 2
+        and
 
-    if bullish_rejection:
-        call_score += 2
+        bullish_slope
 
-    if bearish_rejection:
-        put_score += 2
+        and
 
-    if bullish_breakout:
-        call_score += 2
+        enough_separation
 
-    if bearish_breakdown:
-        put_score += 2
+        and
 
-    # --------------------------------------------------------
-    # FINAL SIGNAL
-    # --------------------------------------------------------
+        bullish_touch
+
+        and
+
+        bullish_confirmation
+
+        and
+
+        not_late_entry
+
+        and
+
+        bullish_vwap
+
+    )
+
+    # ========================================================
+    # FINAL PUT
+    # ========================================================
+
+    put_valid = (
+
+        bearish_trend
+
+        and
+
+        bearish_slope
+
+        and
+
+        enough_separation
+
+        and
+
+        bearish_touch
+
+        and
+
+        bearish_confirmation
+
+        and
+
+        not_late_entry
+
+        and
+
+        bearish_vwap
+
+    )
+
+    # ========================================================
+    # STRENGTH
+    # ========================================================
 
     signal = "WAIT"
     strength = "LOW"
-
     reason = []
 
-    if call_score >= MIN_TRADE_SCORE:
+    if call_valid:
 
         signal = "CALL"
 
-        if call_score >= STRONG_TRADE_SCORE:
+        if (
+            strong_bullish
+            or
+            bullish_engulfing
+        ):
             strength = "STRONG"
         else:
             strength = "MEDIUM"
 
         reason.append(
-            "Bullish EMA + VWAP"
+            "Bullish EMA 9 > EMA 15"
         )
 
-        if bullish_rejection:
+        reason.append(
+            "Upward EMA slope"
+        )
+
+        reason.append(
+            "EMA pullback/touch"
+        )
+
+        if bullish_engulfing:
+            reason.append(
+                "Bullish engulfing"
+            )
+
+        elif bullish_rejection:
             reason.append(
                 "Bullish rejection"
             )
 
-        if bullish_breakout:
+        else:
             reason.append(
-                "Breakout"
+                "Strong bullish candle"
             )
 
-    elif put_score >= MIN_TRADE_SCORE:
+    elif put_valid:
 
         signal = "PUT"
 
-        if put_score >= STRONG_TRADE_SCORE:
+        if (
+            strong_bearish
+            or
+            bearish_engulfing
+        ):
             strength = "STRONG"
         else:
             strength = "MEDIUM"
 
         reason.append(
-            "Bearish EMA + VWAP"
+            "Bearish EMA 9 < EMA 15"
         )
 
-        if bearish_rejection:
+        reason.append(
+            "Downward EMA slope"
+        )
+
+        reason.append(
+            "EMA pullback/touch"
+        )
+
+        if bearish_engulfing:
+            reason.append(
+                "Bearish engulfing"
+            )
+
+        elif bearish_rejection:
             reason.append(
                 "Bearish rejection"
             )
 
-        if bearish_breakdown:
+        else:
             reason.append(
-                "Breakdown"
+                "Strong bearish candle"
             )
 
     else:
 
-        reason.append(
-            "Conditions not strong enough"
-        )
+        if not enough_separation:
+            reason.append(
+                "EMA flat / too close"
+            )
+
+        elif (
+            not bullish_slope
+            and
+            not bearish_slope
+        ):
+            reason.append(
+                "EMA slope weak"
+            )
+
+        elif not not_late_entry:
+            reason.append(
+                "Late entry - price far from EMA"
+            )
+
+        elif (
+            not bullish_confirmation
+            and
+            not bearish_confirmation
+        ):
+            reason.append(
+                "No strong candle confirmation"
+            )
+
+        else:
+            reason.append(
+                "No valid 9/15 EMA setup"
+            )
 
     return {
 
@@ -1078,17 +1568,41 @@ def calculate_signal_at(data, position):
         "vwap":
             vwap,
 
-        "call_score":
-            call_score,
-
-        "put_score":
-            put_score,
+        "atr":
+            atr,
 
         "reason":
             " | ".join(reason),
 
         "time":
-            data.index[position]
+            data.index[position],
+
+        "entry_trigger":
+            safe_float(
+                current["High"]
+            )
+
+            if signal == "CALL"
+
+            else
+
+            safe_float(
+                current["Low"]
+            )
+
+            if signal == "PUT"
+
+            else None,
+
+        "signal_high":
+            safe_float(
+                current["High"]
+            ),
+
+        "signal_low":
+            safe_float(
+                current["Low"]
+            )
 
     }
 
@@ -1099,7 +1613,7 @@ def calculate_signal_at(data, position):
 
 def get_signal(data):
 
-    if len(data) < 21:
+    if len(data) < 30:
         return None
 
     return calculate_signal_at(
@@ -1119,57 +1633,90 @@ def calculate_index_levels(
 
     signal = signal_data["signal"]
 
-    entry = signal_data["price"]
-
-    candle_range = (
-
-        safe_float(candle["High"])
-
-        -
-
-        safe_float(candle["Low"])
-
-    )
-
-    risk = max(
-
-        MIN_RISK_POINTS,
-
-        min(
-            MAX_RISK_POINTS,
-            candle_range * 0.50
-        )
-
-    )
-
-    if signal == "CALL":
-
-        stop_loss = entry - risk
-
-        target = (
-            entry +
-            risk * RISK_REWARD
-        )
-
-    elif signal == "PUT":
-
-        stop_loss = entry + risk
-
-        target = (
-            entry -
-            risk * RISK_REWARD
-        )
-
-    else:
+    if signal == "WAIT":
 
         return {
 
-            "entry": entry,
+            "entry": None,
             "stop_loss": None,
             "target": None,
             "risk": None
 
         }
+
+    # Entry = signal candle break
+
+    if signal == "CALL":
+
+        entry = (
+            safe_float(
+                candle["High"]
+            )
+        )
+
+        stop_loss = (
+            safe_float(
+                candle["Low"]
+            )
+        )
+
+    else:
+
+        entry = (
+            safe_float(
+                candle["Low"]
+            )
+        )
+
+        stop_loss = (
+            safe_float(
+                candle["High"]
+            )
+        )
+
+    risk = abs(
+        entry - stop_loss
+    )
+
+    # ATR fallback
+
+    if risk <= 0:
+
+        atr = safe_float(
+            signal_data.get(
+                "atr",
+                0
+            )
+        )
+
+        risk = max(
+            MIN_RISK_POINTS,
+            min(
+                MAX_RISK_POINTS,
+                atr * 0.5
+            )
+        )
+
+        if signal == "CALL":
+            stop_loss = entry - risk
+        else:
+            stop_loss = entry + risk
+
+    if signal == "CALL":
+
+        target = (
+            entry
+            +
+            risk * RISK_REWARD
+        )
+
+    else:
+
+        target = (
+            entry
+            -
+            risk * RISK_REWARD
+        )
 
     return {
 
@@ -1196,34 +1743,23 @@ def calculate_option_levels(
     option_premium
 ):
 
-    # --------------------------------------------------------
-    # FIXED OPTION SL
-    #
-    # 20% SL
-    #
-    # 40% TARGET
-    #
-    # R:R = 1:2
-    #
-    # NO TRAILING
-    # --------------------------------------------------------
-
     risk_percent = 0.20
 
     risk_amount = (
-        option_premium *
-        risk_percent
+        option_premium
+        * risk_percent
     )
 
     option_sl = (
-        option_premium -
-        risk_amount
+        option_premium
+        - risk_amount
     )
 
     option_target = (
-        option_premium +
-        risk_amount *
-        RISK_REWARD
+        option_premium
+        +
+        risk_amount
+        * RISK_REWARD
     )
 
     return {
@@ -1244,7 +1780,7 @@ def calculate_option_levels(
 
 
 # ============================================================
-# CREATE LIVE TRADE
+# CREATE TRADE
 # ============================================================
 
 def create_trade(
@@ -1268,8 +1804,6 @@ def create_trade(
         "entry_time":
             datetime.now(),
 
-        # INDEX
-
         "index_entry":
             index_levels["entry"],
 
@@ -1281,8 +1815,6 @@ def create_trade(
 
         "index_risk":
             index_levels["risk"],
-
-        # OPTION
 
         "option_symbol":
             option_contract["symbol"],
@@ -1305,9 +1837,6 @@ def create_trade(
         "option_target":
             option_levels["target"],
 
-        "option_risk":
-            option_levels["risk"],
-
         "last_premium":
             option_levels["entry"],
 
@@ -1324,29 +1853,32 @@ def create_trade(
 
 
 # ============================================================
-# CLOSE LIVE TRADE
+# CLOSE TRADE
 # ============================================================
 
 def close_running_trade():
 
-    trade = st.session_state.running_trade
+    trade = (
+        st.session_state.running_trade
+    )
 
     if trade is None:
         return
-
-    entry = trade["option_entry"]
 
     exit_price = trade.get(
         "exit_premium"
     )
 
     if exit_price is None:
-        exit_price = trade[
-            "last_premium"
-        ]
+
+        exit_price = (
+            trade["last_premium"]
+        )
 
     trade["points"] = (
-        exit_price - entry
+        exit_price
+        -
+        trade["option_entry"]
     )
 
     trade["status"] = "CLOSED"
@@ -1367,7 +1899,7 @@ def close_running_trade():
 
 
 # ============================================================
-# UPDATE LIVE TRADE
+# UPDATE TRADE
 # ============================================================
 
 def update_running_trade(
@@ -1375,7 +1907,9 @@ def update_running_trade(
     current_option_contract
 ):
 
-    trade = st.session_state.running_trade
+    trade = (
+        st.session_state.running_trade
+    )
 
     if trade is None:
         return
@@ -1390,18 +1924,12 @@ def update_running_trade(
     trade["last_premium"] = premium
 
     trade["points"] = (
-
         premium
-
         -
-
         trade["option_entry"]
-
     )
 
-    # --------------------------------------------------------
     # OPTION TARGET
-    # --------------------------------------------------------
 
     if premium >= trade["option_target"]:
 
@@ -1415,9 +1943,7 @@ def update_running_trade(
 
         return
 
-    # --------------------------------------------------------
-    # OPTION STOP LOSS
-    # --------------------------------------------------------
+    # OPTION SL
 
     if premium <= trade["option_sl"]:
 
@@ -1431,9 +1957,7 @@ def update_running_trade(
 
         return
 
-    # --------------------------------------------------------
     # INDEX TARGET
-    # --------------------------------------------------------
 
     if (
 
@@ -1441,7 +1965,8 @@ def update_running_trade(
 
         and
 
-        current_index_price >=
+        current_index_price
+        >=
         trade["index_target"]
 
     ):
@@ -1462,7 +1987,8 @@ def update_running_trade(
 
         and
 
-        current_index_price <=
+        current_index_price
+        <=
         trade["index_target"]
 
     ):
@@ -1477,9 +2003,7 @@ def update_running_trade(
 
         return
 
-    # --------------------------------------------------------
-    # INDEX STOP LOSS
-    # --------------------------------------------------------
+    # INDEX SL
 
     if (
 
@@ -1487,7 +2011,8 @@ def update_running_trade(
 
         and
 
-        current_index_price <=
+        current_index_price
+        <=
         trade["index_sl"]
 
     ):
@@ -1508,7 +2033,8 @@ def update_running_trade(
 
         and
 
-        current_index_price >=
+        current_index_price
+        >=
         trade["index_sl"]
 
     ):
@@ -1533,14 +2059,12 @@ def run_historical_backtest(data):
 
     trades = []
 
-    if len(data) < 30:
+    if len(data) < 40:
         return pd.DataFrame()
 
-    position = 20
+    position = 25
 
-    while position < (
-        len(data) - 2
-    ):
+    while position < len(data) - 2:
 
         signal_data = (
             calculate_signal_at(
@@ -1554,28 +2078,21 @@ def run_historical_backtest(data):
             position += 1
             continue
 
-        signal = signal_data["signal"]
+        signal = (
+            signal_data["signal"]
+        )
 
-        # ----------------------------------------------------
-        # MEDIUM + STRONG ONLY
-        # ----------------------------------------------------
-
-        if signal not in ["CALL", "PUT"]:
-
-            position += 1
-            continue
-
-        if signal_data["strength"] not in [
-            "MEDIUM",
-            "STRONG"
+        if signal not in [
+            "CALL",
+            "PUT"
         ]:
 
             position += 1
             continue
 
-        signal_candle = data.iloc[
-            position
-        ]
+        signal_candle = (
+            data.iloc[position]
+        )
 
         levels = (
             calculate_index_levels(
@@ -1585,40 +2102,113 @@ def run_historical_backtest(data):
         )
 
         # ----------------------------------------------------
-        # ENTRY NEXT CANDLE
-        #
-        # Prevents lookahead bias
+        # WAIT FOR ACTUAL BREAKOUT
         # ----------------------------------------------------
 
-        entry_position = (
-            position + 1
+        trigger = (
+            levels["entry"]
         )
 
-        entry_candle = data.iloc[
-            entry_position
-        ]
-
-        entry = safe_float(
-            entry_candle["Open"]
+        setup_sl = (
+            levels["stop_loss"]
         )
 
-        risk = levels["risk"]
+        entry_position = None
+        entry = None
+
+        trigger_end = min(
+            position + 5,
+            len(data) - 1
+        )
+
+        for check_position in range(
+            position + 1,
+            trigger_end + 1
+        ):
+
+            future = (
+                data.iloc[
+                    check_position
+                ]
+            )
+
+            future_high = safe_float(
+                future["High"]
+            )
+
+            future_low = safe_float(
+                future["Low"]
+            )
+
+            # CALL:
+            # first invalidate setup if low breaks SL
+
+            if signal == "CALL":
+
+                if future_low <= setup_sl:
+                    break
+
+                if future_high > trigger:
+
+                    entry_position = (
+                        check_position
+                    )
+
+                    entry = trigger
+
+                    break
+
+            # PUT
+
+            else:
+
+                if future_high >= setup_sl:
+                    break
+
+                if future_low < trigger:
+
+                    entry_position = (
+                        check_position
+                    )
+
+                    entry = trigger
+
+                    break
+
+        # No valid break
+
+        if entry_position is None:
+
+            position += 1
+            continue
+
+        risk = abs(
+            entry - setup_sl
+        )
+
+        if risk <= 0:
+
+            position = (
+                entry_position + 1
+            )
+
+            continue
+
+        sl = setup_sl
 
         if signal == "CALL":
 
-            sl = entry - risk
-
             target = (
-                entry +
+                entry
+                +
                 risk * RISK_REWARD
             )
 
         else:
 
-            sl = entry + risk
-
             target = (
-                entry -
+                entry
+                -
                 risk * RISK_REWARD
             )
 
@@ -1626,23 +2216,30 @@ def run_historical_backtest(data):
 
         end_position = min(
 
-            entry_position +
+            entry_position
+            +
             BACKTEST_MAX_HOLD_CANDLES,
 
             len(data) - 1
 
         )
 
+        # Start after entry candle
+        # avoids false same-candle sequencing
+
         for future_position in range(
 
-            entry_position,
+            entry_position + 1,
+
             end_position + 1
 
         ):
 
-            future = data.iloc[
-                future_position
-            ]
+            future = (
+                data.iloc[
+                    future_position
+                ]
+            )
 
             high = safe_float(
                 future["High"]
@@ -1652,14 +2249,9 @@ def run_historical_backtest(data):
                 future["Low"]
             )
 
-            # ------------------------------------------------
-            # CALL
-            # ------------------------------------------------
-
             if signal == "CALL":
 
-                # Conservative:
-                # SL first if both touched
+                # Conservative SL first
 
                 if low <= sl:
 
@@ -1685,14 +2277,9 @@ def run_historical_backtest(data):
 
                     break
 
-            # ------------------------------------------------
-            # PUT
-            # ------------------------------------------------
-
             else:
 
-                # Conservative:
-                # SL first if both touched
+                # Conservative SL first
 
                 if high >= sl:
 
@@ -1718,15 +2305,15 @@ def run_historical_backtest(data):
 
                     break
 
-        # ----------------------------------------------------
         # TIME EXIT
-        # ----------------------------------------------------
 
         if not exit_found:
 
-            final_candle = data.iloc[
-                end_position
-            ]
+            final_candle = (
+                data.iloc[
+                    end_position
+                ]
+            )
 
             exit_price = safe_float(
                 final_candle["Close"]
@@ -1736,22 +2323,26 @@ def run_historical_backtest(data):
                 "TIME EXIT"
             )
 
-            future_position = end_position
+            future_position = (
+                end_position
+            )
 
-        # ----------------------------------------------------
         # POINTS
-        # ----------------------------------------------------
 
         if signal == "CALL":
 
             points = (
-                exit_price - entry
+                exit_price
+                -
+                entry
             )
 
         else:
 
             points = (
-                entry - exit_price
+                entry
+                -
+                exit_price
             )
 
         trades.append({
@@ -1762,11 +2353,24 @@ def run_historical_backtest(data):
             "Strength":
                 signal_data["strength"],
 
+            "Signal Time":
+                str(
+                    data.index[position]
+                ),
+
             "Entry Time":
-                str(data.index[entry_position]),
+                str(
+                    data.index[
+                        entry_position
+                    ]
+                ),
 
             "Exit Time":
-                str(data.index[future_position]),
+                str(
+                    data.index[
+                        future_position
+                    ]
+                ),
 
             "Entry":
                 round(entry, 2),
@@ -1778,21 +2382,27 @@ def run_historical_backtest(data):
                 round(target, 2),
 
             "Exit":
-                round(exit_price, 2),
+                round(
+                    exit_price,
+                    2
+                ),
 
             "Points":
-                round(points, 2),
+                round(
+                    points,
+                    2
+                ),
 
             "Exit Reason":
                 exit_reason
 
         })
 
-        # ----------------------------------------------------
-        # NO OVERLAPPING TRADE
-        # ----------------------------------------------------
+        # No overlapping trades
 
-        position = future_position + 1
+        position = (
+            future_position + 1
+        )
 
     if not trades:
         return pd.DataFrame()
@@ -1801,14 +2411,15 @@ def run_historical_backtest(data):
 
 
 # ============================================================
-# HISTORICAL BACKTEST STATS
+# HISTORICAL STATS
 # ============================================================
 
 def get_historical_stats(backtest_df):
 
     if (
         backtest_df is None
-        or backtest_df.empty
+        or
+        backtest_df.empty
     ):
 
         return {
@@ -1818,8 +2429,7 @@ def get_historical_stats(backtest_df):
             "losses": 0,
             "breakeven": 0,
             "win_rate": 0,
-            "net_points": 0,
-            "candles": 0
+            "net_points": 0
 
         }
 
@@ -1876,10 +2486,7 @@ def get_historical_stats(backtest_df):
             win_rate,
 
         "net_points":
-            net_points,
-
-        "candles":
-            0
+            net_points
 
     }
 
@@ -1907,20 +2514,38 @@ def get_live_trade_stats():
         }
 
     wins = len([
+
         x for x in trades
-        if x.get("points", 0) > 0
+
+        if x.get(
+            "points",
+            0
+        ) > 0
+
     ])
 
     losses = len([
+
         x for x in trades
-        if x.get("points", 0) < 0
+
+        if x.get(
+            "points",
+            0
+        ) < 0
+
     ])
 
     closed = len(trades)
 
     net_points = sum(
-        x.get("points", 0)
+
+        x.get(
+            "points",
+            0
+        )
+
         for x in trades
+
     )
 
     win_rate = (
@@ -1952,14 +2577,17 @@ def get_live_trade_stats():
 # ============================================================
 
 st.title(
-    "📈 Personal Scalping Scanner"
+    "📈 Personal 9-15 EMA Scalping Scanner"
 )
 
 st.caption(
-    "EMA 9 + EMA 15 + VWAP | "
-    "MEDIUM + STRONG Signals | "
-    "ATM/ITM Options Only | "
-    "Fixed SL | Minimum Risk:Reward 1:2"
+    "Strict EMA Pullback Strategy | "
+    "EMA Slope + Separation | "
+    "Candle Confirmation | "
+    "Signal Candle Break | "
+    "VWAP Filter | "
+    "ITM/ATM Options | "
+    "1:2 Risk:Reward"
 )
 
 
@@ -1968,14 +2596,16 @@ st.caption(
 # ============================================================
 
 col1, col2, col3 = st.columns(
-    [1, 1, 0.5]
+    [1, 1, 0.6]
 )
 
 with col1:
 
     index_name = st.selectbox(
         "Select Index",
-        list(INDEX_CONFIG.keys()),
+        list(
+            INDEX_CONFIG.keys()
+        ),
         index=0
     )
 
@@ -1983,8 +2613,10 @@ with col2:
 
     timeframe = st.selectbox(
         "Select Timeframe",
-        list(TIMEFRAME_CONFIG.keys()),
-        index=2
+        list(
+            TIMEFRAME_CONFIG.keys()
+        ),
+        index=3
     )
 
 with col3:
@@ -1992,7 +2624,7 @@ with col3:
     st.write("")
 
     if st.button(
-        "🔄 Refresh Market Data"
+        "🔄 Refresh"
     ):
 
         get_market_data.clear()
@@ -2003,7 +2635,7 @@ with col3:
 
 
 # ============================================================
-# GET MARKET DATA
+# MARKET DATA
 # ============================================================
 
 symbol = (
@@ -2016,7 +2648,6 @@ df = get_market_data(
     timeframe
 )
 
-
 if df.empty:
 
     st.error(
@@ -2027,7 +2658,7 @@ if df.empty:
 
 
 # ============================================================
-# CALCULATE INDICATORS
+# INDICATORS
 # ============================================================
 
 data = calculate_indicators(
@@ -2041,7 +2672,7 @@ signal_data = get_signal(
 if signal_data is None:
 
     st.warning(
-        "Signal calculate करने के लिए पर्याप्त data नहीं है।"
+        "Signal के लिए पर्याप्त data नहीं है।"
     )
 
     st.stop()
@@ -2073,7 +2704,7 @@ vwap = (
 
 
 # ============================================================
-# CURRENT INDEX LEVELS
+# INDEX LEVELS
 # ============================================================
 
 last_candle = data.iloc[-1]
@@ -2092,12 +2723,16 @@ index_levels = (
 
 option_contract = None
 option_levels = None
-option_chain = None
 
-if signal in ["CALL", "PUT"]:
+if signal in [
+    "CALL",
+    "PUT"
+]:
 
-    option_chain = get_option_chain(
-        index_name
+    option_chain = (
+        get_option_chain(
+            index_name
+        )
     )
 
     option_type = (
@@ -2112,10 +2747,15 @@ if signal in ["CALL", "PUT"]:
 
     option_contract = (
         find_option_contract(
+
             option_chain,
+
             price,
+
             option_type,
+
             index_name
+
         )
     )
 
@@ -2170,12 +2810,15 @@ if (
 
 
 # ============================================================
-# CREATE NEW LIVE TRADE
+# CREATE NEW TRADE
 # ============================================================
 
 trade_allowed = (
 
-    signal in ["CALL", "PUT"]
+    signal in [
+        "CALL",
+        "PUT"
+    ]
 
     and
 
@@ -2220,20 +2863,18 @@ if (
 
     ):
 
-        new_trade = create_trade(
-
-            signal_data,
-
-            index_levels,
-
-            option_contract,
-
-            option_levels
-
-        )
-
         st.session_state.running_trade = (
-            new_trade
+            create_trade(
+
+                signal_data,
+
+                index_levels,
+
+                option_contract,
+
+                option_levels
+
+            )
         )
 
         st.session_state.last_trade_signal_time = (
@@ -2247,21 +2888,15 @@ if (
 
 if signal == "CALL":
 
-    signal_class = (
-        "signal-call"
-    )
+    signal_class = "signal-call"
 
 elif signal == "PUT":
 
-    signal_class = (
-        "signal-put"
-    )
+    signal_class = "signal-put"
 
 else:
 
-    signal_class = (
-        "signal-wait"
-    )
+    signal_class = "signal-wait"
 
 
 # ============================================================
@@ -2269,7 +2904,7 @@ else:
 # ============================================================
 
 st.markdown(
-    "## Current Signal"
+    "## 🎯 Current Signal"
 )
 
 m1, m2 = st.columns(2)
@@ -2277,6 +2912,7 @@ m1, m2 = st.columns(2)
 with m1:
 
     st.markdown(
+
         metric_box(
 
             "Signal",
@@ -2293,155 +2929,121 @@ with m1:
 
 with m2:
 
-    if (
-        st.session_state.running_trade
-    ):
+    if st.session_state.running_trade:
 
-        trade_status = (
-            "RUNNING"
-        )
+        trade_status = "RUNNING"
 
     elif trade_allowed:
 
-        trade_status = (
-            "READY"
-        )
+        trade_status = "SETUP READY"
 
     else:
 
-        trade_status = (
-            "NO TRADE"
-        )
+        trade_status = "NO TRADE"
 
     st.markdown(
+
         metric_box(
             "Trade Status",
             trade_status
         ),
+
         unsafe_allow_html=True
+
     )
 
 
-c1, c2 = st.columns(2)
+c1, c2, c3, c4 = st.columns(4)
 
 with c1:
 
-    st.markdown(
-        metric_box(
-            "Price",
-            format_number(price)
-        ),
-        unsafe_allow_html=True
+    st.metric(
+        "Price",
+        format_number(price)
     )
 
 with c2:
 
-    st.markdown(
-        metric_box(
-            "EMA 9",
-            format_number(ema9)
-        ),
-        unsafe_allow_html=True
+    st.metric(
+        "EMA 9",
+        format_number(ema9)
+    )
+
+with c3:
+
+    st.metric(
+        "EMA 15",
+        format_number(ema15)
+    )
+
+with c4:
+
+    st.metric(
+        "VWAP",
+        format_number(vwap)
     )
 
 
-c1, c2 = st.columns(2)
+# ============================================================
+# SIGNAL REASON
+# ============================================================
 
-with c1:
-
-    st.markdown(
-        metric_box(
-            "EMA 15",
-            format_number(ema15)
-        ),
-        unsafe_allow_html=True
-    )
-
-with c2:
-
-    st.markdown(
-        metric_box(
-            "VWAP",
-            format_number(vwap)
-        ),
-        unsafe_allow_html=True
-    )
+st.markdown(
+    f"### Signal Condition\n"
+    f"{signal_data['reason']}"
+)
 
 
 # ============================================================
 # INDEX LEVELS
 # ============================================================
 
-if signal in ["CALL", "PUT"]:
+if signal in [
+    "CALL",
+    "PUT"
+]:
 
-    c1, c2 = st.columns(2)
+    st.markdown(
+        "## 📍 Index Trade Levels"
+    )
 
-    with c1:
+    l1, l2, l3, l4 = st.columns(4)
 
-        st.markdown(
-            metric_box(
-                "Index Entry",
-                format_number(
-                    index_levels["entry"]
-                )
-            ),
-            unsafe_allow_html=True
+    with l1:
+
+        st.metric(
+            "Entry Trigger",
+            format_number(
+                index_levels["entry"]
+            )
         )
 
-    with c2:
+    with l2:
 
-        st.markdown(
-            metric_box(
-                "Index SL",
-                format_number(
-                    index_levels["stop_loss"]
-                )
-            ),
-            unsafe_allow_html=True
+        st.metric(
+            "Stop Loss",
+            format_number(
+                index_levels["stop_loss"]
+            )
         )
 
+    with l3:
 
-    c1, c2 = st.columns(2)
-
-    with c1:
-
-        st.markdown(
-            metric_box(
-                "Index Target (1:2)",
-                format_number(
-                    index_levels["target"]
-                )
-            ),
-            unsafe_allow_html=True
+        st.metric(
+            "Target 1:2",
+            format_number(
+                index_levels["target"]
+            )
         )
 
-    with c2:
+    with l4:
 
-        st.markdown(
-            metric_box(
-                "Risk : Reward",
-                "1 : 2"
-            ),
-            unsafe_allow_html=True
+        st.metric(
+            "Risk",
+            format_number(
+                index_levels["risk"]
+            )
         )
-
-
-# ============================================================
-# SIGNAL CONDITION
-# ============================================================
-
-st.markdown(
-    f"**Signal Condition:** "
-    f"{signal_data['reason']}"
-)
-
-st.caption(
-    f"CALL Score: "
-    f"{signal_data['call_score']} | "
-
-    f"PUT Score: "
-    f"{signal_data['put_score']}"
-)
 
 
 # ============================================================
@@ -2449,95 +3051,83 @@ st.caption(
 # ============================================================
 
 st.markdown(
-    "## 🎯 Live Option Premium"
+    "## 💰 Live Option Premium"
 )
 
 if option_contract is not None:
 
-    o1, o2 = st.columns(2)
+    o1, o2, o3 = st.columns(3)
 
     with o1:
 
-        st.markdown(
-            metric_box(
-                "Selected Option",
-                option_contract["symbol"]
-            ),
-            unsafe_allow_html=True
+        st.metric(
+            "Option",
+            option_contract[
+                "symbol"
+            ]
         )
 
     with o2:
 
-        st.markdown(
-            metric_box(
-                "Expiry",
-                option_contract["expiry"]
-            ),
-            unsafe_allow_html=True
+        st.metric(
+            "Premium",
+            format_number(
+                option_contract[
+                    "premium"
+                ]
+            )
         )
 
+    with o3:
 
-    o1, o2 = st.columns(2)
-
-    with o1:
-
-        st.markdown(
-            metric_box(
-                "Actual NSE Premium",
-                format_number(
-                    option_contract["premium"]
-                )
-            ),
-            unsafe_allow_html=True
+        st.metric(
+            "Expiry",
+            option_contract[
+                "expiry"
+            ]
         )
-
-    with o2:
-
-        st.markdown(
-            metric_box(
-                "Strike",
-                format_number(
-                    option_contract["strike"],
-                    0
-                )
-            ),
-            unsafe_allow_html=True
-        )
-
 
     if option_levels is not None:
 
-        o1, o2 = st.columns(2)
+        o1, o2, o3 = st.columns(3)
 
         with o1:
 
-            st.markdown(
-                metric_box(
-                    "Fixed Option SL",
-                    format_number(
-                        option_levels["sl"]
-                    )
-                ),
-                unsafe_allow_html=True
+            st.metric(
+                "Option Entry",
+                format_number(
+                    option_levels[
+                        "entry"
+                    ]
+                )
             )
 
         with o2:
 
-            st.markdown(
-                metric_box(
-                    "Option Target (1:2)",
-                    format_number(
-                        option_levels["target"]
-                    )
-                ),
-                unsafe_allow_html=True
+            st.metric(
+                "Option SL",
+                format_number(
+                    option_levels[
+                        "sl"
+                    ]
+                )
             )
 
+        with o3:
+
+            st.metric(
+                "Option Target",
+                format_number(
+                    option_levels[
+                        "target"
+                    ]
+                )
+            )
 
 else:
 
-    st.warning(
-        "NSE option-chain से option premium अभी उपलब्ध नहीं है।"
+    st.info(
+        "कोई valid option setup उपलब्ध नहीं है।"
     )
 
 
@@ -2556,9 +3146,7 @@ chart_data = (
 fig = go.Figure()
 
 
-# ============================================================
 # CANDLESTICK
-# ============================================================
 
 fig.add_trace(
 
@@ -2581,9 +3169,7 @@ fig.add_trace(
 )
 
 
-# ============================================================
 # EMA 9
-# ============================================================
 
 fig.add_trace(
 
@@ -2595,20 +3181,14 @@ fig.add_trace(
 
         mode="lines",
 
-        name="EMA 9",
-
-        line=dict(
-            width=1.5
-        )
+        name="EMA 9"
 
     )
 
 )
 
 
-# ============================================================
 # EMA 15
-# ============================================================
 
 fig.add_trace(
 
@@ -2620,20 +3200,14 @@ fig.add_trace(
 
         mode="lines",
 
-        name="EMA 15",
-
-        line=dict(
-            width=1.5
-        )
+        name="EMA 15"
 
     )
 
 )
 
 
-# ============================================================
 # VWAP
-# ============================================================
 
 fig.add_trace(
 
@@ -2645,70 +3219,49 @@ fig.add_trace(
 
         mode="lines",
 
-        name="VWAP",
-
-        line=dict(
-            width=1.5
-        )
+        name="VWAP"
 
     )
 
 )
 
 
-# ============================================================
-# CURRENT SIGNAL LEVELS
-# ============================================================
+# SIGNAL LEVELS
 
-if signal in ["CALL", "PUT"]:
-
-    entry = (
-        index_levels["entry"]
-    )
-
-    sl = (
-        index_levels["stop_loss"]
-    )
-
-    target = (
-        index_levels["target"]
-    )
+if signal in [
+    "CALL",
+    "PUT"
+]:
 
     fig.add_hline(
 
-        y=entry,
+        y=index_levels["entry"],
 
         line_dash="dot",
 
         annotation_text=(
-            f"{signal} ENTRY "
-            f"{entry:.2f}"
+            f"{signal} ENTRY"
         )
 
     )
 
     fig.add_hline(
 
-        y=sl,
+        y=index_levels["stop_loss"],
 
         line_dash="dash",
 
-        annotation_text=(
-            f"SL {sl:.2f}"
-        )
+        annotation_text="SL"
 
     )
 
     fig.add_hline(
 
-        y=target,
+        y=index_levels["target"],
 
         line_dash="dash",
 
-        annotation_text=(
-            f"TARGET 1:2 "
-            f"{target:.2f}"
-        )
+        annotation_text="TARGET 1:2"
 
     )
 
@@ -2730,7 +3283,9 @@ if signal in ["CALL", "PUT"]:
                 chart_data.index[-1]
             ],
 
-            y=[entry],
+            y=[
+                index_levels["entry"]
+            ],
 
             mode="markers+text",
 
@@ -2743,58 +3298,14 @@ if signal in ["CALL", "PUT"]:
             ),
 
             text=[
-                f"{signal} ENTRY"
+                f"{signal}"
             ],
 
             textposition="top center",
 
-            name=f"{signal} ENTRY"
+            name="Signal"
 
         )
-
-    )
-
-
-# ============================================================
-# RUNNING TRADE LEVELS
-# ============================================================
-
-running = (
-    st.session_state.running_trade
-)
-
-if running is not None:
-
-    fig.add_hline(
-
-        y=running["index_entry"],
-
-        line_dash="dot",
-
-        annotation_text=(
-            f"RUNNING "
-            f"{running['signal']} ENTRY"
-        )
-
-    )
-
-    fig.add_hline(
-
-        y=running["index_sl"],
-
-        line_dash="dash",
-
-        annotation_text="RUNNING SL"
-
-    )
-
-    fig.add_hline(
-
-        y=running["index_target"],
-
-        line_dash="dash",
-
-        annotation_text="RUNNING TARGET 1:2"
 
     )
 
@@ -2820,13 +3331,9 @@ fig.update_layout(
 
 )
 
-
 st.plotly_chart(
-
     fig,
-
     use_container_width=True
-
 )
 
 
@@ -2850,94 +3357,70 @@ if running is None:
 
 else:
 
-    r1, r2 = st.columns(2)
+    r1, r2, r3, r4 = st.columns(4)
 
     with r1:
 
-        st.markdown(
-            metric_box(
-                "Signal",
-                running["signal"]
-            ),
-            unsafe_allow_html=True
-        )
-
-        st.markdown(
-            metric_box(
-                "Strength",
-                running["strength"]
-            ),
-            unsafe_allow_html=True
-        )
-
-        st.markdown(
-            metric_box(
-                "Option",
-                running["option_symbol"]
-            ),
-            unsafe_allow_html=True
-        )
-
-        st.markdown(
-            metric_box(
-                "Option Entry",
-                format_number(
-                    running[
-                        "option_entry"
-                    ]
-                )
-            ),
-            unsafe_allow_html=True
+        st.metric(
+            "Signal",
+            running["signal"]
         )
 
     with r2:
 
-        st.markdown(
-            metric_box(
-                "Current Premium",
-                format_number(
-                    running[
-                        "last_premium"
-                    ]
-                )
-            ),
-            unsafe_allow_html=True
+        st.metric(
+            "Option Entry",
+            format_number(
+                running[
+                    "option_entry"
+                ]
+            )
         )
 
-        st.markdown(
-            metric_box(
-                "Fixed SL",
-                format_number(
-                    running[
-                        "option_sl"
-                    ]
-                )
-            ),
-            unsafe_allow_html=True
+    with r3:
+
+        st.metric(
+            "Current Premium",
+            format_number(
+                running[
+                    "last_premium"
+                ]
+            )
         )
 
-        st.markdown(
-            metric_box(
-                "Target 1:2",
-                format_number(
-                    running[
-                        "option_target"
-                    ]
-                )
-            ),
-            unsafe_allow_html=True
+    with r4:
+
+        st.metric(
+            "P/L Points",
+            format_number(
+                running[
+                    "points"
+                ]
+            )
         )
 
-        st.markdown(
-            metric_box(
-                "P/L Points",
-                format_number(
-                    running[
-                        "points"
-                    ]
-                )
-            ),
-            unsafe_allow_html=True
+    r1, r2 = st.columns(2)
+
+    with r1:
+
+        st.metric(
+            "Fixed SL",
+            format_number(
+                running[
+                    "option_sl"
+                ]
+            )
+        )
+
+    with r2:
+
+        st.metric(
+            "Target 1:2",
+            format_number(
+                running[
+                    "option_target"
+                ]
+            )
         )
 
 
@@ -2982,7 +3465,7 @@ backtest_df = (
     )
 )
 
-historical_stats = (
+stats = (
     get_historical_stats(
         backtest_df
     )
@@ -2994,28 +3477,28 @@ with h1:
 
     st.metric(
         "Total Trades",
-        historical_stats["total"]
+        stats["total"]
     )
 
 with h2:
 
     st.metric(
         "Wins",
-        historical_stats["wins"]
+        stats["wins"]
     )
 
 with h3:
 
     st.metric(
         "Losses",
-        historical_stats["losses"]
+        stats["losses"]
     )
 
 with h4:
 
     st.metric(
         "Win Rate",
-        f"{historical_stats['win_rate']:.1f}%"
+        f"{stats['win_rate']:.1f}%"
     )
 
 
@@ -3025,26 +3508,26 @@ with h1:
 
     st.metric(
         "Breakeven",
-        historical_stats["breakeven"]
+        stats["breakeven"]
     )
 
 with h2:
 
     st.metric(
         "Net Points",
-        f"{historical_stats['net_points']:.2f}"
+        f"{stats['net_points']:.2f}"
     )
 
 with h3:
 
     st.metric(
-        "Backtest Candles",
+        "Candles Tested",
         len(data)
     )
 
 
 # ============================================================
-# HISTORICAL BACKTEST TABLE
+# BACKTEST TABLE
 # ============================================================
 
 st.markdown(
@@ -3054,7 +3537,7 @@ st.markdown(
 if backtest_df.empty:
 
     st.info(
-        "Historical trades नहीं मिले।"
+        "इस strict strategy में कोई valid trade नहीं मिला।"
     )
 
 else:
@@ -3063,7 +3546,7 @@ else:
 
         backtest_df.iloc[
             ::-1
-        ].head(10),
+        ].head(20),
 
         use_container_width=True
 
@@ -3128,7 +3611,7 @@ else:
     rows = []
 
     for trade in reversed(
-        closed_trades[-10:]
+        closed_trades[-20:]
     ):
 
         rows.append({
@@ -3183,9 +3666,8 @@ else:
 # ============================================================
 
 st.caption(
-    "EMA 9 + EMA 15 + VWAP | "
-    "MEDIUM + STRONG Signals | "
-    "ATM/ITM Options Only | "
-    "Fixed Stop Loss | "
-    "Minimum Risk:Reward 1:2"
+    "9 EMA + 15 EMA Strict Pullback Strategy | "
+    "Trend + Slope + Separation + Pullback + "
+    "Candle Confirmation + Break Entry | "
+    "Fixed 1:2 Risk:Reward"
 )
