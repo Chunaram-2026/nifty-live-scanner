@@ -1,4049 +1,2497 @@
-from flask import Flask, jsonify, request
-import yfinance as yf
+import streamlit as st
 import pandas as pd
 import numpy as np
-import traceback
+import yfinance as yf
+import requests
+import json
+import time
+import math
+from datetime import datetime, timedelta
+import plotly.graph_objects as go
 
-app = Flask(__name__)
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+
+st.set_page_config(
+    page_title="Personal Scalping Scanner",
+    page_icon="📈",
+    layout="wide"
+)
 
 
-# =========================================================
-# SETTINGS
-# =========================================================
+# ============================================================
+# CUSTOM CSS
+# ============================================================
 
-INDICES = {
-    "NIFTY 50": "^NSEI",
-    "BANK NIFTY": "^NSEBANK",
-    "SENSEX": "^BSESN",
+st.markdown("""
+<style>
+
+.stApp {
+    background-color: #080d16;
+    color: #d9e2ef;
 }
 
-TIMEFRAMES = [
-    "1m",
-    "2m",
-    "3m",
-    "5m",
-    "15m",
-    "1h",
-    "2h",
-    "1d",
-    "1wk",
-]
+.block-container {
+    padding-top: 1rem;
+    padding-bottom: 2rem;
+}
 
-IST_TIMEZONE = "Asia/Kolkata"
+div[data-testid="stMetric"] {
+    background: #172231;
+    border: 1px solid #26384b;
+    padding: 12px;
+    border-radius: 10px;
+}
 
+.metric-box {
+    background: #172231;
+    border: 1px solid #26384b;
+    padding: 12px;
+    border-radius: 9px;
+    min-height: 82px;
+    margin-bottom: 8px;
+}
 
-# =========================================================
-# TRADING SETTINGS
-# =========================================================
+.metric-label {
+    color: #9aa7b7;
+    font-size: 11px;
+}
 
-MAX_TRADES_PER_DAY = 3
+.metric-value {
+    color: #dce5ef;
+    font-size: 18px;
+    font-weight: 700;
+    margin-top: 6px;
+}
 
-MAX_STOP_LOSS_POINTS = 15.0
-MIN_STOP_LOSS_POINTS = 1.0
+.signal-call {
+    color: #48d597;
+    font-weight: 800;
+}
 
-RR_1 = 2.0
-RR_2 = 3.0
+.signal-put {
+    color: #ff6b81;
+    font-weight: 800;
+}
 
-SL_BUFFER_POINTS = 0.0
+.signal-wait {
+    color: #f3c969;
+    font-weight: 800;
+}
 
+.section-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-top: 12px;
+    margin-bottom: 8px;
+}
 
-# =========================================================
-# EMA TREND SETTINGS
-# =========================================================
-
-EMA_SLOPE_LOOKBACK = 5
-
-MIN_EMA_SLOPE_PERCENT = 0.05
-
-
-# =========================================================
-# SIDEWAYS MARKET FILTER
-# =========================================================
-
-SIDEWAYS_LOOKBACK = 10
-
-MIN_EMA_SEPARATION_PERCENT = 0.015
-MIN_VWAP_SEPARATION_PERCENT = 0.010
-MIN_SIDEWAYS_SLOPE_PERCENT = 0.025
-
-MAX_EMA_CROSS_CHANGES = 2
-
-
-# =========================================================
-# CANDLE QUALITY
-# =========================================================
-
-MIN_BODY_RATIO = 0.45
-WICK_RATIO = 1.5
-
-
-# =========================================================
-# MARKET TIME
-# NSE
-# =========================================================
-
-MARKET_OPEN_HOUR = 9
-MARKET_OPEN_MINUTE = 15
-
-NO_TRADE_AFTER_OPEN_MINUTES = 10
-
-MARKET_CLOSE_HOUR = 15
-MARKET_CLOSE_MINUTE = 30
-
-NO_TRADE_BEFORE_CLOSE_MINUTES = 20
+</style>
+""", unsafe_allow_html=True)
 
 
-# =========================================================
-# TIMEFRAME SETTINGS
-# =========================================================
+# ============================================================
+# SESSION STATE
+# ============================================================
 
-def timeframe_settings(tf):
+if "running_trade" not in st.session_state:
+    st.session_state.running_trade = None
 
-    if tf == "1m":
-        return "1m", "7d", None
+if "closed_trades" not in st.session_state:
+    st.session_state.closed_trades = []
 
-    if tf == "2m":
-        return "2m", "60d", None
+if "last_signal" not in st.session_state:
+    st.session_state.last_signal = None
 
-    if tf == "3m":
-        return "1m", "7d", "3min"
-
-    if tf == "5m":
-        return "5m", "60d", None
-
-    if tf == "15m":
-        return "15m", "60d", None
-
-    if tf == "1h":
-        return "1h", "730d", None
-
-    if tf == "2h":
-        return "1h", "730d", "2h"
-
-    if tf == "1d":
-        return "1d", "5y", None
-
-    if tf == "1wk":
-        return "1wk", "10y", None
-
-    return "5m", "60d", None
+if "last_trade_signal_time" not in st.session_state:
+    st.session_state.last_trade_signal_time = None
 
 
-# =========================================================
-# TIMEZONE HELPER
-# =========================================================
+# ============================================================
+# CONSTANTS
+# ============================================================
 
-def to_ist_timestamp(timestamp):
+INDEX_CONFIG = {
+    "NIFTY 50": {
+        "yahoo": "^NSEI",
+        "nse": "NIFTY",
+        "strike_step": 50
+    },
+    "BANK NIFTY": {
+        "yahoo": "^NSEBANK",
+        "nse": "BANKNIFTY",
+        "strike_step": 100
+    },
+    "SENSEX": {
+        "yahoo": "^BSESN",
+        "nse": "SENSEX",
+        "strike_step": 100
+    }
+}
+
+
+TIMEFRAME_CONFIG = {
+    "1m": {
+        "interval": "1m",
+        "period": "1d"
+    },
+    "2m": {
+        "interval": "2m",
+        "period": "5d"
+    },
+    "3m": {
+        "interval": "5m",
+        "period": "5d"
+    },
+    "5m": {
+        "interval": "5m",
+        "period": "5d"
+    },
+    "15m": {
+        "interval": "15m",
+        "period": "5d"
+    },
+    "1h": {
+        "interval": "60m",
+        "period": "1mo"
+    },
+    "2h": {
+        "interval": "60m",
+        "period": "1mo"
+    },
+    "1d": {
+        "interval": "1d",
+        "period": "6mo"
+    },
+    "1wk": {
+        "interval": "1wk",
+        "period": "2y"
+    }
+}
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def safe_float(value, default=None):
 
     try:
 
-        ts = pd.Timestamp(timestamp)
+        if value is None:
+            return default
 
-        if ts.tzinfo is None:
+        if isinstance(value, str):
+            value = value.replace(",", "")
 
-            ts = ts.tz_localize(
-                IST_TIMEZONE
+        return float(value)
+
+    except Exception:
+        return default
+
+
+def format_number(value, digits=2):
+
+    if value is None:
+        return "-"
+
+    try:
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return "-"
+
+
+def metric_box(label, value, value_class=""):
+
+    return f"""
+    <div class="metric-box">
+        <div class="metric-label">{label}</div>
+        <div class="metric-value {value_class}">
+            {value}
+        </div>
+    </div>
+    """
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
+
+@st.cache_data(ttl=30)
+def get_market_data(symbol, timeframe):
+
+    config = TIMEFRAME_CONFIG[timeframe]
+
+    ticker = yf.Ticker(symbol)
+
+    df = ticker.history(
+        period=config["period"],
+        interval=config["interval"],
+        auto_adjust=False
+    )
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+
+    df.columns = [
+        str(x).capitalize()
+        for x in df.columns
+    ]
+
+    if "Datetime" in df.columns:
+        df = df.set_index("Datetime")
+
+    return df
+
+
+# ============================================================
+# INDICATORS
+# ============================================================
+
+def calculate_indicators(df):
+
+    data = df.copy()
+
+    # EMA 9
+    data["EMA9"] = (
+        data["Close"]
+        .ewm(span=9, adjust=False)
+        .mean()
+    )
+
+    # EMA 15
+    data["EMA15"] = (
+        data["Close"]
+        .ewm(span=15, adjust=False)
+        .mean()
+    )
+
+    # Typical Price
+    data["TypicalPrice"] = (
+        data["High"]
+        + data["Low"]
+        + data["Close"]
+    ) / 3
+
+    # VWAP
+    volume = data["Volume"].replace(0, np.nan)
+
+    cumulative_tp_volume = (
+        data["TypicalPrice"] * volume
+    ).cumsum()
+
+    cumulative_volume = volume.cumsum()
+
+    data["VWAP"] = (
+        cumulative_tp_volume /
+        cumulative_volume
+    )
+
+    # fallback
+    data["VWAP"] = (
+        data["VWAP"]
+        .fillna(data["TypicalPrice"])
+    )
+
+    # Candle body
+    data["Body"] = (
+        data["Close"] -
+        data["Open"]
+    ).abs()
+
+    # Candle range
+    data["Range"] = (
+        data["High"] -
+        data["Low"]
+    ).replace(0, np.nan)
+
+    # Upper wick
+    data["UpperWick"] = (
+        data["High"] -
+        data[["Open", "Close"]].max(axis=1)
+    )
+
+    # Lower wick
+    data["LowerWick"] = (
+        data[["Open", "Close"]].min(axis=1) -
+        data["Low"]
+    )
+
+    return data
+
+
+# ============================================================
+# OPTION CHAIN
+# ============================================================
+
+def get_nse_session():
+
+    session = requests.Session()
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+
+    session.headers.update(headers)
+
+    try:
+        session.get(
+            "https://www.nseindia.com",
+            timeout=10
+        )
+    except Exception:
+        pass
+
+    return session
+
+
+@st.cache_data(ttl=20)
+def get_option_chain(index_name):
+
+    nse_symbol = INDEX_CONFIG[index_name]["nse"]
+
+    session = get_nse_session()
+
+    try:
+
+        url = (
+            "https://www.nseindia.com/"
+            "api/option-chain-indices"
+            f"?symbol={nse_symbol}"
+        )
+
+        response = session.get(
+            url,
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+
+        return data
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# EXPIRY DATE
+# ============================================================
+
+def get_nearest_expiry(option_chain):
+
+    try:
+
+        expiry_dates = (
+            option_chain
+            .get("records", {})
+            .get("expiryDates", [])
+        )
+
+        if not expiry_dates:
+            return None
+
+        today = datetime.now().date()
+
+        valid_dates = []
+
+        for expiry in expiry_dates:
+
+            try:
+
+                date_obj = datetime.strptime(
+                    expiry,
+                    "%d-%b-%Y"
+                ).date()
+
+                if date_obj >= today:
+                    valid_dates.append(
+                        (date_obj, expiry)
+                    )
+
+            except Exception:
+                pass
+
+        if valid_dates:
+
+            valid_dates.sort(
+                key=lambda x: x[0]
             )
+
+            return valid_dates[0][1]
+
+        return expiry_dates[0]
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# FIND ATM / ITM OPTION
+# ============================================================
+
+def find_option_contract(
+    option_chain,
+    spot_price,
+    option_type,
+    index_name
+):
+
+    if option_chain is None:
+        return None
+
+    try:
+
+        records = (
+            option_chain
+            .get("records", {})
+            .get("data", [])
+        )
+
+        expiry = get_nearest_expiry(
+            option_chain
+        )
+
+        if expiry is None:
+            return None
+
+        strike_step = INDEX_CONFIG[
+            index_name
+        ]["strike_step"]
+
+        atm_strike = round(
+            spot_price / strike_step
+        ) * strike_step
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # User requested:
+        # OTM option नहीं चाहिए
+        #
+        # CALL:
+        # ATM या थोड़ा ITM
+        #
+        # PUT:
+        # ATM या थोड़ा ITM
+        # ----------------------------------------------------
+
+        if option_type == "CE":
+
+            preferred_strikes = [
+                atm_strike,
+                atm_strike - strike_step,
+                atm_strike - (2 * strike_step)
+            ]
 
         else:
 
-            ts = ts.tz_convert(
-                IST_TIMEZONE
+            preferred_strikes = [
+                atm_strike,
+                atm_strike + strike_step,
+                atm_strike + (2 * strike_step)
+            ]
+
+        available = []
+
+        for row in records:
+
+            if row.get("expiryDate") != expiry:
+                continue
+
+            strike = safe_float(
+                row.get("strikePrice")
             )
 
-        return ts
+            if strike is None:
+                continue
+
+            if option_type not in row:
+                continue
+
+            option_data = row.get(
+                option_type,
+                {}
+            )
+
+            premium = safe_float(
+                option_data.get("lastPrice")
+            )
+
+            if premium is None:
+                continue
+
+            if premium <= 0:
+                continue
+
+            available.append({
+                "strike": strike,
+                "premium": premium,
+                "data": option_data,
+                "expiry": expiry
+            })
+
+        if not available:
+            return None
+
+        # Prefer ATM / ITM only
+        for strike in preferred_strikes:
+
+            matches = [
+                x for x in available
+                if x["strike"] == strike
+            ]
+
+            if matches:
+
+                selected = matches[0]
+
+                option_data = selected["data"]
+
+                return {
+                    "option_type": option_type,
+                    "strike": selected["strike"],
+                    "premium": selected["premium"],
+                    "expiry": selected["expiry"],
+                    "symbol": (
+                        f"{index_name} "
+                        f"{int(selected['strike'])} "
+                        f"{option_type}"
+                    ),
+                    "oi": safe_float(
+                        option_data.get(
+                            "openInterest"
+                        ),
+                        0
+                    ),
+                    "volume": safe_float(
+                        option_data.get(
+                            "totalTradedVolume"
+                        ),
+                        0
+                    )
+                }
+
+        # Fallback nearest suitable ITM / ATM
+        if option_type == "CE":
+
+            valid = [
+                x for x in available
+                if x["strike"] <= spot_price
+            ]
+
+        else:
+
+            valid = [
+                x for x in available
+                if x["strike"] >= spot_price
+            ]
+
+        if valid:
+
+            valid.sort(
+                key=lambda x:
+                abs(
+                    x["strike"] -
+                    atm_strike
+                )
+            )
+
+            selected = valid[0]
+
+            option_data = selected["data"]
+
+            return {
+                "option_type": option_type,
+                "strike": selected["strike"],
+                "premium": selected["premium"],
+                "expiry": selected["expiry"],
+                "symbol": (
+                    f"{index_name} "
+                    f"{int(selected['strike'])} "
+                    f"{option_type}"
+                ),
+                "oi": safe_float(
+                    option_data.get(
+                        "openInterest"
+                    ),
+                    0
+                ),
+                "volume": safe_float(
+                    option_data.get(
+                        "totalTradedVolume"
+                    ),
+                    0
+                )
+            }
+
+        return None
 
     except Exception:
+        return None
 
-        return pd.Timestamp(timestamp)
 
+# ============================================================
+# SIGNAL CONDITIONS
+# ============================================================
 
-# =========================================================
-# CLEAN DATA
-# =========================================================
-
-def clean_columns(data):
+def get_signal(data):
 
     if data is None:
         return None
 
-    if data.empty:
+    if len(data) < 20:
         return None
 
-    data = data.copy()
+    last = data.iloc[-1]
+    previous = data.iloc[-2]
 
-    # Handle MultiIndex returned by yfinance
-    if isinstance(data.columns, pd.MultiIndex):
+    price = safe_float(last["Close"])
+    ema9 = safe_float(last["EMA9"])
+    ema15 = safe_float(last["EMA15"])
+    vwap = safe_float(last["VWAP"])
 
-        data.columns = data.columns.get_level_values(0)
-
-    required = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-    ]
-
-    for col in required:
-
-        if col not in data.columns:
-            return None
-
-    if "Volume" not in data.columns:
-
-        data["Volume"] = 0
-
-    for col in required + ["Volume"]:
-
-        data[col] = pd.to_numeric(
-            data[col],
-            errors="coerce"
-        )
-
-    data = data.dropna(
-        subset=required
+    previous_close = safe_float(
+        previous["Close"]
     )
 
-    if data.empty:
-        return None
-
-    data = data.sort_index()
-
-    return data
-
-
-# =========================================================
-# DOWNLOAD DATA
-# =========================================================
-
-def download_data(symbol, tf):
-
-    interval, period, resample_rule = (
-        timeframe_settings(tf)
+    previous_ema9 = safe_float(
+        previous["EMA9"]
     )
 
-    try:
-
-        data = yf.download(
-            tickers=symbol,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=False,
-            threads=False,
-            group_by="column",
-            prepost=False,
-        )
-
-        data = clean_columns(data)
-
-        if data is None:
-            return None
-
-        # Custom timeframe resampling
-        if resample_rule:
-
-            data = data.resample(
-                resample_rule
-            ).agg({
-
-                "Open": "first",
-                "High": "max",
-                "Low": "min",
-                "Close": "last",
-                "Volume": "sum",
-
-            })
-
-            data = data.dropna(
-                subset=[
-                    "Open",
-                    "High",
-                    "Low",
-                    "Close",
-                ]
-            )
-
-        return data
-
-    except Exception as e:
-
-        print("DOWNLOAD ERROR:", e)
-
-        traceback.print_exc()
-
-        return None
-
-
-# =========================================================
-# CALCULATE INDICATORS
-# =========================================================
-
-def calculate_indicators(data):
-
-    if data is None or data.empty:
-        return None
-
-    data = data.copy()
-
-    close = pd.to_numeric(
-        data["Close"],
-        errors="coerce"
+    previous_ema15 = safe_float(
+        previous["EMA15"]
     )
 
-    high = pd.to_numeric(
-        data["High"],
-        errors="coerce"
+    candle_range = (
+        safe_float(last["High"]) -
+        safe_float(last["Low"])
     )
 
-    low = pd.to_numeric(
-        data["Low"],
-        errors="coerce"
+    body = abs(
+        safe_float(last["Close"]) -
+        safe_float(last["Open"])
     )
 
-    open_price = pd.to_numeric(
-        data["Open"],
-        errors="coerce"
+    lower_wick = safe_float(
+        last["LowerWick"],
+        0
     )
 
-    volume = pd.to_numeric(
-        data["Volume"],
-        errors="coerce"
-    ).fillna(0)
-
-
-    # EMA 9
-    data["EMA9"] = close.ewm(
-        span=9,
-        adjust=False
-    ).mean()
-
-
-    # EMA 15
-    data["EMA15"] = close.ewm(
-        span=15,
-        adjust=False
-    ).mean()
-
-
-    # OHLC/4
-    average_price = (
-
-        open_price
-        + high
-        + low
-        + close
-
-    ) / 4
-
-
-    # =====================================================
-    # DAILY VWAP RESET
-    # =====================================================
-
-    dates = pd.Series(
-        pd.to_datetime(
-            data.index
-        ).date,
-        index=data.index
+    upper_wick = safe_float(
+        last["UpperWick"],
+        0
     )
 
-
-    # Yahoo index data may have zero volume.
-    # In that case OHLC/4 is used as fallback.
-
-    if volume.sum() <= 0:
-
-        data["VWAP"] = average_price
-
-    else:
-
-        price_volume = (
-            average_price * volume
-        )
-
-        cumulative_pv = (
-            price_volume
-            .groupby(dates)
-            .cumsum()
-        )
-
-        cumulative_volume = (
-            volume
-            .groupby(dates)
-            .cumsum()
-        )
-
-        data["VWAP"] = np.where(
-
-            cumulative_volume > 0,
-
-            cumulative_pv
-            / cumulative_volume,
-
-            average_price
-        )
-
-
-    # EMA SLOPE
-    data["EMA9_SLOPE"] = (
-
-        data["EMA9"]
-
-        -
-
-        data["EMA9"].shift(
-            EMA_SLOPE_LOOKBACK
-        )
-    )
-
-
-    data["EMA15_SLOPE"] = (
-
-        data["EMA15"]
-
-        -
-
-        data["EMA15"].shift(
-            EMA_SLOPE_LOOKBACK
-        )
-    )
-
-
-    return data
-
-
-# =========================================================
-# CANDLE QUALITY
-# =========================================================
-
-def candle_info(row):
-
-    try:
-
-        o = float(row["Open"])
-        h = float(row["High"])
-        l = float(row["Low"])
-        c = float(row["Close"])
-
-    except Exception:
-
-        return {
-            "valid": False
-        }
-
-
-    candle_range = h - l
-
-    body = abs(c - o)
-
-
-    if candle_range <= 0:
-
-        return {
-            "valid": False
-        }
-
-
-    body_ratio = (
-        body / candle_range
-    )
-
-
-    upper_wick = (
-        h - max(o, c)
-    )
-
-
-    lower_wick = (
-        min(o, c) - l
-    )
-
-
-    bullish = c > o
-
-    bearish = c < o
-
-
-    strong_body = (
-
-        body_ratio
-        >= MIN_BODY_RATIO
-
-    )
-
-
-    # Bullish rejection / hammer
-    bullish_hammer = (
-
-        bullish
-
-        and body > 0
-
-        and lower_wick
-        >= body * WICK_RATIO
-
-        and upper_wick
-        <= candle_range * 0.35
-    )
-
-
-    # Bearish rejection
-    bearish_hammer = (
-
-        bearish
-
-        and body > 0
-
-        and upper_wick
-        >= body * WICK_RATIO
-
-        and lower_wick
-        <= candle_range * 0.35
-    )
-
-
-    good_bullish = (
-
-        bullish
-
-        and (
-
-            strong_body
-            or
-            bullish_hammer
-        )
-    )
-
-
-    good_bearish = (
-
-        bearish
-
-        and (
-
-            strong_body
-            or
-            bearish_hammer
-        )
-    )
-
-
-    return {
-
-        "valid": True,
-
-        "bullish": bullish,
-
-        "bearish": bearish,
-
-        "body_ratio": body_ratio,
-
-        "upper_wick": upper_wick,
-
-        "lower_wick": lower_wick,
-
-        "strong_body": strong_body,
-
-        "bullish_hammer": bullish_hammer,
-
-        "bearish_hammer": bearish_hammer,
-
-        "good_bullish": good_bullish,
-
-        "good_bearish": good_bearish,
-    }
-
-
-# =========================================================
-# EMA TREND CHECK
-# =========================================================
-
-def ema_trend_ok(row):
-
-    try:
-
-        close = float(row["Close"])
-
-        ema9 = float(row["EMA9"])
-
-        ema15 = float(row["EMA15"])
-
-        ema9_slope = float(
-            row["EMA9_SLOPE"]
-        )
-
-        ema15_slope = float(
-            row["EMA15_SLOPE"]
-        )
-
-    except Exception:
-
-        return {
-
-            "bullish": False,
-            "bearish": False,
-        }
-
-
-    if close <= 0:
-
-        return {
-
-            "bullish": False,
-            "bearish": False,
-        }
-
-
-    values = [
-
-        ema9,
-        ema15,
-        ema9_slope,
-        ema15_slope,
-    ]
-
-
-    if any(
-        pd.isna(x)
-        for x in values
-    ):
-
-        return {
-
-            "bullish": False,
-            "bearish": False,
-        }
-
-
-    ema9_slope_percent = (
-
-        ema9_slope / close
-
-    ) * 100
-
-
-    ema15_slope_percent = (
-
-        ema15_slope / close
-
-    ) * 100
-
-
-    bullish = (
-
-        ema9 > ema15
-
-        and
-
-        ema9_slope_percent
-        >= MIN_EMA_SLOPE_PERCENT
-
-        and
-
-        ema15_slope_percent > 0
-    )
-
-
-    bearish = (
-
-        ema9 < ema15
-
-        and
-
-        ema9_slope_percent
-        <= -MIN_EMA_SLOPE_PERCENT
-
-        and
-
-        ema15_slope_percent < 0
-    )
-
-
-    return {
-
-        "bullish": bullish,
-
-        "bearish": bearish,
-
-        "ema9_slope_percent":
-        ema9_slope_percent,
-
-        "ema15_slope_percent":
-        ema15_slope_percent,
-    }
-
-
-# =========================================================
-# SIDEWAYS MARKET FILTER
-# =========================================================
-
-def is_sideways_market(data, index):
-
-    if index < SIDEWAYS_LOOKBACK:
-        return False
-
-
-    try:
-
-        recent = data.iloc[
-            index - SIDEWAYS_LOOKBACK + 1:
-            index + 1
-        ].copy()
-
-
-        if len(recent) < SIDEWAYS_LOOKBACK:
-            return False
-
-
-        last = recent.iloc[-1]
-
-        price = float(
-            last["Close"]
-        )
-
-        if price <= 0:
-            return True
-
-
-        ema9 = recent["EMA9"].astype(
-            float
-        )
-
-        ema15 = recent["EMA15"].astype(
-            float
-        )
-
-        vwap = recent["VWAP"].astype(
-            float
-        )
-
-
-        # EMA9 and EMA15 distance
-
-        ema_distance_percent = (
-
-            abs(
-                float(ema9.iloc[-1])
-                -
-                float(ema15.iloc[-1])
-            )
-
-            / price
-
-        ) * 100
-
-
-        # EMA9 and VWAP distance
-
-        ema9_vwap_distance_percent = (
-
-            abs(
-                float(ema9.iloc[-1])
-                -
-                float(vwap.iloc[-1])
-            )
-
-            / price
-
-        ) * 100
-
-
-        # EMA15 and VWAP distance
-
-        ema15_vwap_distance_percent = (
-
-            abs(
-                float(ema15.iloc[-1])
-                -
-                float(vwap.iloc[-1])
-            )
-
-            / price
-
-        ) * 100
-
-
-        # EMA crossover count
-
-        relationship = np.where(
-
-            ema9.values > ema15.values,
-
-            1,
-
-            -1
-        )
-
-
-        relationship_changes = np.sum(
-
-            relationship[1:]
-            !=
-            relationship[:-1]
-        )
-
-
-        # EMA movement
-
-        ema9_move_percent = (
-
-            abs(
-
-                float(ema9.iloc[-1])
-                -
-                float(ema9.iloc[0])
-
-            )
-
-            / price
-
-        ) * 100
-
-
-        ema15_move_percent = (
-
-            abs(
-
-                float(ema15.iloc[-1])
-                -
-                float(ema15.iloc[0])
-
-            )
-
-            / price
-
-        ) * 100
-
-
-        ema_too_close = (
-
-            ema_distance_percent
-            < MIN_EMA_SEPARATION_PERCENT
-        )
-
-
-        vwap_too_close = (
-
-            ema9_vwap_distance_percent
-            < MIN_VWAP_SEPARATION_PERCENT
-
-            and
-
-            ema15_vwap_distance_percent
-            < MIN_VWAP_SEPARATION_PERCENT
-        )
-
-
-        weak_movement = (
-
-            ema9_move_percent
-            < MIN_SIDEWAYS_SLOPE_PERCENT
-
-            and
-
-            ema15_move_percent
-            < MIN_SIDEWAYS_SLOPE_PERCENT
-        )
-
-
-        too_many_crosses = (
-
-            relationship_changes
-            >= MAX_EMA_CROSS_CHANGES
-        )
-
-
-        if (
-
-            ema_too_close
-
-            and
-
-            vwap_too_close
-
-        ):
-            return True
-
-
-        if (
-
-            ema_too_close
-
-            and
-
-            weak_movement
-
-        ):
-            return True
-
-
-        if (
-
-            too_many_crosses
-
-            and
-
-            weak_movement
-
-        ):
-            return True
-
-
-        return False
-
-
-    except Exception as e:
-
-        print(
-            "SIDEWAYS FILTER ERROR:",
-            e
-        )
-
-        return False
-
-
-# =========================================================
-# MARKET TIME FILTER
-# =========================================================
-
-def is_market_time_allowed(timestamp, tf):
-
-    # Daily and weekly charts
-
-    if tf in [
-        "1d",
-        "1wk",
-    ]:
-        return True
-
-
-    try:
-
-        ts = to_ist_timestamp(
-            timestamp
-        )
-
-
-        current_minutes = (
-
-            ts.hour * 60
-
-            +
-
-            ts.minute
-        )
-
-
-        market_open_minutes = (
-
-            MARKET_OPEN_HOUR * 60
-
-            +
-
-            MARKET_OPEN_MINUTE
-        )
-
-
-        market_close_minutes = (
-
-            MARKET_CLOSE_HOUR * 60
-
-            +
-
-            MARKET_CLOSE_MINUTE
-        )
-
-
-        first_allowed = (
-
-            market_open_minutes
-
-            +
-
-            NO_TRADE_AFTER_OPEN_MINUTES
-        )
-
-
-        last_allowed = (
-
-            market_close_minutes
-
-            -
-
-            NO_TRADE_BEFORE_CLOSE_MINUTES
-        )
-
-
-        if current_minutes < first_allowed:
-            return False
-
-
-        if current_minutes >= last_allowed:
-            return False
-
-
-        return True
-
-
-    except Exception:
-
-        return False
-
-
-# =========================================================
-# GET SIGNAL
-# =========================================================
-
-def get_signal(row, data=None, index=None):
-
-    try:
-
-        price = float(row["Close"])
-
-        ema9 = float(row["EMA9"])
-
-        ema15 = float(row["EMA15"])
-
-        vwap = float(row["VWAP"])
-
-    except Exception:
-
-        return "WAIT"
-
-
-    values = [
-        price,
-        ema9,
-        ema15,
-        vwap,
-    ]
-
-
-    if any(
-        pd.isna(x)
-        for x in values
-    ):
-        return "WAIT"
-
-
-    # SIDEWAYS FILTER
-
-    if (
-
-        data is not None
-
-        and
-
-        index is not None
-
-    ):
-
-        if is_sideways_market(
-            data,
-            index
-        ):
-            return "WAIT"
-
-
-    # CANDLE
-
-    candle = candle_info(row)
-
-    if not candle.get("valid"):
-        return "WAIT"
-
-
-    # TREND
-
-    trend = ema_trend_ok(row)
-
-
-    # =====================================================
-    # CALL
-    # =====================================================
-
-    bullish_structure = (
-
-        ema9 > ema15
-
-        and
-
-        trend.get(
-            "bullish",
-            False
-        )
-
-        and
-
-        price > ema9
-
-        and
-
-        price > ema15
-
-        and
-
+    if candle_range is None:
+        candle_range = 0
+
+    # --------------------------------------------------------
+    # TREND CONDITIONS
+    # --------------------------------------------------------
+
+    bullish_trend = (
+        price > ema9 and
+        ema9 > ema15 and
         price > vwap
     )
 
-
-    if (
-
-        bullish_structure
-
-        and
-
-        candle.get(
-            "good_bullish",
-            False
-        )
-    ):
-
-        return "CALL"
-
-
-    # =====================================================
-    # PUT
-    # =====================================================
-
-    bearish_structure = (
-
-        ema9 < ema15
-
-        and
-
-        trend.get(
-            "bearish",
-            False
-        )
-
-        and
-
-        price < ema9
-
-        and
-
-        price < ema15
-
-        and
-
+    bearish_trend = (
+        price < ema9 and
+        ema9 < ema15 and
         price < vwap
     )
 
+    # --------------------------------------------------------
+    # EMA CROSS
+    # --------------------------------------------------------
 
-    if (
-
-        bearish_structure
-
+    bullish_cross = (
+        previous_ema9 <= previous_ema15
         and
-
-        candle.get(
-            "good_bearish",
-            False
-        )
-    ):
-
-        return "PUT"
-
-
-    return "WAIT"
-
-
-# =========================================================
-# ADD SIGNAL MARKERS
-# =========================================================
-
-def add_signal_markers(data, tf):
-
-    if data is None or data.empty:
-        return data
-
-
-    data = data.copy()
-
-    markers = []
-
-    previous_signal = "WAIT"
-
-
-    for i, (timestamp, row) in enumerate(
-        data.iterrows()
-    ):
-
-        signal = get_signal(
-            row,
-            data,
-            i
-        )
-
-
-        marker = ""
-
-
-        if not is_market_time_allowed(
-            timestamp,
-            tf
-        ):
-
-            signal = "WAIT"
-
-
-        if (
-
-            signal == "CALL"
-
-            and
-
-            previous_signal != "CALL"
-
-        ):
-
-            marker = "CALL"
-
-
-        elif (
-
-            signal == "PUT"
-
-            and
-
-            previous_signal != "PUT"
-
-        ):
-
-            marker = "PUT"
-
-
-        markers.append(marker)
-
-
-        previous_signal = signal
-
-
-    data["MARKER"] = markers
-
-    return data
-
-
-# =========================================================
-# CALCULATE ALL
-# =========================================================
-
-def calculate_all_signals(data, tf):
-
-    if data is None or data.empty:
-        return None
-
-
-    data = calculate_indicators(
-        data
+        ema9 > ema15
     )
 
-
-    if data is None or data.empty:
-        return None
-
-
-    data = add_signal_markers(
-        data,
-        tf
+    bearish_cross = (
+        previous_ema9 >= previous_ema15
+        and
+        ema9 < ema15
     )
 
+    # --------------------------------------------------------
+    # CANDLE DIRECTION
+    # --------------------------------------------------------
 
-    return data
+    bullish_candle = (
+        price >
+        safe_float(last["Open"])
+    )
 
+    bearish_candle = (
+        price <
+        safe_float(last["Open"])
+    )
 
-# =========================================================
-# CREATE TRADE LEVELS
-# =========================================================
+    # --------------------------------------------------------
+    # LIQUIDITY SWEEP / REJECTION
+    # --------------------------------------------------------
 
-def create_trade_levels(signal, row):
+    bullish_rejection = (
+        lower_wick >
+        body * 1.2
+        and
+        price >
+        safe_float(last["Open"])
+    )
 
-    try:
+    bearish_rejection = (
+        upper_wick >
+        body * 1.2
+        and
+        price <
+        safe_float(last["Open"])
+    )
 
-        entry = float(
-            row["Close"]
+    # --------------------------------------------------------
+    # BREAKOUT
+    # --------------------------------------------------------
+
+    recent_high = (
+        data["High"]
+        .iloc[-6:-1]
+        .max()
+    )
+
+    recent_low = (
+        data["Low"]
+        .iloc[-6:-1]
+        .min()
+    )
+
+    bullish_breakout = (
+        price > recent_high
+    )
+
+    bearish_breakdown = (
+        price < recent_low
+    )
+
+    # --------------------------------------------------------
+    # SCORE
+    # --------------------------------------------------------
+
+    call_score = 0
+    put_score = 0
+
+    if bullish_trend:
+        call_score += 3
+
+    if bearish_trend:
+        put_score += 3
+
+    if bullish_candle:
+        call_score += 1
+
+    if bearish_candle:
+        put_score += 1
+
+    if bullish_cross:
+        call_score += 2
+
+    if bearish_cross:
+        put_score += 2
+
+    if bullish_rejection:
+        call_score += 2
+
+    if bearish_rejection:
+        put_score += 2
+
+    if bullish_breakout:
+        call_score += 2
+
+    if bearish_breakdown:
+        put_score += 2
+
+    # --------------------------------------------------------
+    # FINAL SIGNAL
+    # --------------------------------------------------------
+
+    signal = "WAIT"
+    strength = "LOW"
+    reason = []
+
+    if call_score >= 5:
+
+        signal = "CALL"
+
+        if call_score >= 7:
+            strength = "STRONG"
+
+        reason.append(
+            "Bullish EMA + VWAP structure"
         )
 
-        low = float(
-            row["Low"]
+        if bullish_rejection:
+            reason.append(
+                "Bullish rejection"
+            )
+
+        if bullish_breakout:
+            reason.append(
+                "Breakout"
+            )
+
+    elif put_score >= 5:
+
+        signal = "PUT"
+
+        if put_score >= 7:
+            strength = "STRONG"
+
+        reason.append(
+            "Bearish EMA + VWAP structure"
         )
 
-        high = float(
-            row["High"]
+        if bearish_rejection:
+            reason.append(
+                "Bearish rejection"
+            )
+
+        if bearish_breakdown:
+            reason.append(
+                "Breakdown"
+            )
+
+    else:
+
+        reason.append(
+            "Signal conditions not strong enough"
         )
 
-    except Exception:
+    return {
+        "signal": signal,
+        "strength": strength,
+        "price": price,
+        "ema9": ema9,
+        "ema15": ema15,
+        "vwap": vwap,
+        "call_score": call_score,
+        "put_score": put_score,
+        "reason": " | ".join(reason),
+        "time": data.index[-1]
+    }
 
-        return None
 
+# ============================================================
+# INDEX SL / TARGET CALCULATION
+# ============================================================
 
-    # CALL
+def calculate_index_levels(
+    signal_data,
+    data
+):
+
+    signal = signal_data["signal"]
+    entry = signal_data["price"]
+
+    last = data.iloc[-1]
+
+    candle_range = (
+        safe_float(last["High"]) -
+        safe_float(last["Low"])
+    )
+
+    # Maximum 10-15 point style risk
+    risk = max(
+        8,
+        min(
+            15,
+            candle_range * 0.50
+        )
+    )
 
     if signal == "CALL":
 
-        stop_loss = (
+        stop_loss = entry - risk
 
-            low
-            -
-            SL_BUFFER_POINTS
+        target1 = entry + risk
+
+        target2 = entry + (
+            risk * 2
         )
 
+    elif signal == "PUT":
 
-        risk = (
+        stop_loss = entry + risk
 
-            entry
-            -
-            stop_loss
+        target1 = entry - risk
+
+        target2 = entry - (
+            risk * 2
         )
 
-
-        if risk <= 0:
-            return None
-
-
-        if risk < MIN_STOP_LOSS_POINTS:
-            return None
-
-
-        if risk > MAX_STOP_LOSS_POINTS:
-            return None
-
-
-        target_1 = (
-
-            entry
-            +
-            risk * RR_1
-        )
-
-
-        target_2 = (
-
-            entry
-            +
-            risk * RR_2
-        )
-
+    else:
 
         return {
-
-            "type": "CALL",
-
             "entry": entry,
-
-            "stop_loss": stop_loss,
-
-            "risk": risk,
-
-            "target_1": target_1,
-
-            "target_2": target_2,
+            "stop_loss": None,
+            "target1": None,
+            "target2": None,
+            "risk": None
         }
 
-
-    # PUT
-
-    if signal == "PUT":
-
-        stop_loss = (
-
-            high
-            +
-            SL_BUFFER_POINTS
-        )
-
-
-        risk = (
-
-            stop_loss
-            -
-            entry
-        )
-
-
-        if risk <= 0:
-            return None
-
-
-        if risk < MIN_STOP_LOSS_POINTS:
-            return None
-
-
-        if risk > MAX_STOP_LOSS_POINTS:
-            return None
-
-
-        target_1 = (
-
-            entry
-            -
-            risk * RR_1
-        )
-
-
-        target_2 = (
-
-            entry
-            -
-            risk * RR_2
-        )
-
-
-        return {
-
-            "type": "PUT",
-
-            "entry": entry,
-
-            "stop_loss": stop_loss,
-
-            "risk": risk,
-
-            "target_1": target_1,
-
-            "target_2": target_2,
-        }
-
-
-    return None
-
-
-# =========================================================
-# SCANNER
-# =========================================================
-
-def calculate_scanner(data, tf):
-
-    empty_result = {
-
-        "signal": "WAIT",
-
-        "price": None,
-
-        "ema9": None,
-
-        "ema15": None,
-
-        "vwap": None,
-
-        "stop_loss": None,
-
-        "risk": None,
-
-        "target_1": None,
-
-        "target_2": None,
-
-        "trade_allowed": False,
-
-        "message": "No trade",
-
-        "time": None,
+    return {
+        "entry": entry,
+        "stop_loss": stop_loss,
+        "target1": target1,
+        "target2": target2,
+        "risk": risk
     }
 
 
-    if data is None or len(data) < 30:
+# ============================================================
+# OPTION PREMIUM SL / TARGET
+# ============================================================
 
-        empty_result["signal"] = "NO DATA"
+def calculate_option_levels(
+    option_premium
+):
 
-        empty_result["message"] = (
-            "Not enough market data"
-        )
+    # --------------------------------------------------------
+    # OPTION PREMIUM RISK
+    #
+    # Premium SL = 20%
+    #
+    # Target 1 = +20%  -> 1:1
+    # Target 2 = +40%  -> 1:2
+    #
+    # At Target 1:
+    # SL moves to Entry Price
+    # --------------------------------------------------------
 
-        return empty_result
+    risk_percent = 0.20
 
-
-    row = data.iloc[-1]
-
-    timestamp = data.index[-1]
-
-    index = len(data) - 1
-
-
-    price = float(row["Close"])
-
-
-    signal = get_signal(
-        row,
-        data,
-        index
+    risk_amount = (
+        option_premium *
+        risk_percent
     )
 
-
-    allowed_time = is_market_time_allowed(
-        timestamp,
-        tf
+    option_sl = (
+        option_premium -
+        risk_amount
     )
 
+    target1 = (
+        option_premium +
+        risk_amount
+    )
 
-    if not allowed_time:
+    target2 = (
+        option_premium +
+        risk_amount * 2
+    )
 
-        signal = "WAIT"
-
-
-    levels = None
-
-
-    if signal in [
-        "CALL",
-        "PUT",
-    ]:
-
-        levels = create_trade_levels(
-            signal,
-            row
-        )
-
-
-        if levels is None:
-
-            signal = "WAIT"
-
-
-    result = {
-
-        "signal": signal,
-
-        "price": round(
-            price,
-            2
-        ),
-
-        "ema9": round(
-            float(row["EMA9"]),
-            2
-        ),
-
-        "ema15": round(
-            float(row["EMA15"]),
-            2
-        ),
-
-        "vwap": round(
-            float(row["VWAP"]),
-            2
-        ),
-
-        "stop_loss": None,
-
-        "risk": None,
-
-        "target_1": None,
-
-        "target_2": None,
-
-        "trade_allowed": False,
-
-        "message": "WAIT",
-
-        "time": str(
-            to_ist_timestamp(
-                timestamp
-            )
-        ),
+    return {
+        "entry": option_premium,
+        "sl": option_sl,
+        "target1": target1,
+        "target2": target2,
+        "risk": risk_amount
     }
 
 
-    if levels is not None:
+# ============================================================
+# CREATE TRADE
+# ============================================================
 
-        result["stop_loss"] = round(
-            levels["stop_loss"],
-            2
-        )
+def create_trade(
+    signal_data,
+    index_levels,
+    option_contract,
+    option_levels
+):
 
-        result["risk"] = round(
-            levels["risk"],
-            2
-        )
+    if option_contract is None:
+        return None
 
-        result["target_1"] = round(
-            levels["target_1"],
-            2
-        )
+    return {
+        "signal": signal_data["signal"],
 
-        result["target_2"] = round(
-            levels["target_2"],
-            2
-        )
+        "status": "RUNNING",
 
-        result["trade_allowed"] = True
+        "entry_time":
+            datetime.now(),
 
-        result["message"] = (
-            "TRADE READY"
-        )
+        "index_entry":
+            index_levels["entry"],
 
+        "index_sl":
+            index_levels["stop_loss"],
 
-    return result
+        "index_target1":
+            index_levels["target1"],
 
+        "index_target2":
+            index_levels["target2"],
 
-# =========================================================
-# CHART JSON
-# =========================================================
+        "index_risk":
+            index_levels["risk"],
 
-def chart_json(data):
+        # -----------------------------------------
+        # OPTION
+        # -----------------------------------------
 
-    if data is None or data.empty:
-        return []
+        "option_symbol":
+            option_contract["symbol"],
 
+        "option_type":
+            option_contract["option_type"],
 
-    result = []
+        "option_strike":
+            option_contract["strike"],
 
+        "option_expiry":
+            option_contract["expiry"],
 
-    for timestamp, row in data.iterrows():
+        "option_entry":
+            option_levels["entry"],
 
-        try:
+        "option_sl":
+            option_levels["sl"],
 
-            ts = pd.Timestamp(
-                timestamp
-            )
+        "option_original_sl":
+            option_levels["sl"],
 
+        "option_target1":
+            option_levels["target1"],
 
-            # Convert timezone safely
+        "option_target2":
+            option_levels["target2"],
 
-            if ts.tzinfo is not None:
+        "option_risk":
+            option_levels["risk"],
 
-                unix_time = int(
-                    ts.timestamp()
-                )
+        # -----------------------------------------
+        # TRAILING
+        # -----------------------------------------
 
-            else:
+        "target1_hit":
+            False,
 
-                unix_time = int(
-                    ts.tz_localize(
-                        IST_TIMEZONE
-                    ).timestamp()
-                )
+        "trailing_active":
+            False,
 
+        "trailing_sl":
+            option_levels["sl"],
 
-            result.append({
+        "exit_reason":
+            None,
 
-                "time": unix_time,
+        "exit_premium":
+            None,
 
-                "open": round(
-                    float(row["Open"]),
-                    2
-                ),
+        "last_premium":
+            option_levels["entry"],
 
-                "high": round(
-                    float(row["High"]),
-                    2
-                ),
-
-                "low": round(
-                    float(row["Low"]),
-                    2
-                ),
-
-                "close": round(
-                    float(row["Close"]),
-                    2
-                ),
-
-                "ema9": round(
-                    float(row["EMA9"]),
-                    2
-                ),
-
-                "ema15": round(
-                    float(row["EMA15"]),
-                    2
-                ),
-
-                "vwap": round(
-                    float(row["VWAP"]),
-                    2
-                ),
-
-                "marker": str(
-                    row.get(
-                        "MARKER",
-                        ""
-                    )
-                ),
-            })
-
-        except Exception as e:
-
-            print(
-                "CHART ERROR:",
-                e
-            )
-
-
-    return result
-
-
-# =========================================================
-# BACKTEST
-# ONLY CLOSED TRADES
-# =========================================================
-
-def run_backtest(data, tf):
-
-    empty = {
-
-        "trades": [],
-
-        "total_trades": 0,
-
-        "wins": 0,
-
-        "losses": 0,
-
-        "win_rate": 0,
-
-        "net_points": 0,
-
-        "target_1_hits": 0,
-
-        "target_2_hits": 0,
-
-        "running_trade": None,
+        "points":
+            0
     }
 
 
-    if data is None or len(data) < 30:
-        return empty
+# ============================================================
+# UPDATE RUNNING TRADE
+# ============================================================
 
+def update_running_trade(
+    current_index_price,
+    current_option_contract
+):
 
-    trades = []
+    trade = st.session_state.running_trade
 
-    open_trade = None
+    if trade is None:
+        return
 
-    daily_trade_count = {}
+    if current_option_contract is None:
+        return
 
+    current_option_premium = (
+        current_option_contract["premium"]
+    )
 
-    for i in range(
-        20,
-        len(data)
+    trade["last_premium"] = (
+        current_option_premium
+    )
+
+    # --------------------------------------------------------
+    # OPTION PROFIT / LOSS
+    # --------------------------------------------------------
+
+    trade["points"] = (
+        current_option_premium -
+        trade["option_entry"]
+    )
+
+    # --------------------------------------------------------
+    # TARGET 1 HIT
+    #
+    # IMPORTANT:
+    #
+    # When 1:1 achieved:
+    #
+    # Trailing SL -> Entry Price
+    # --------------------------------------------------------
+
+    if (
+        not trade["target1_hit"]
+        and
+        current_option_premium >=
+        trade["option_target1"]
     ):
 
-        row = data.iloc[i]
+        trade["target1_hit"] = True
 
-        timestamp = data.index[i]
+        trade["trailing_active"] = True
 
-
-        date_key = str(
-
-            to_ist_timestamp(
-                timestamp
-            ).date()
-
+        # BREAKEVEN STOP LOSS
+        trade["trailing_sl"] = (
+            trade["option_entry"]
         )
 
-
-        # =================================================
-        # CHECK RUNNING TRADE
-        # =================================================
-
-        if open_trade is not None:
-
-            trade_type = open_trade["type"]
-
-            entry = open_trade["entry"]
-
-            stop_loss = open_trade["stop_loss"]
-
-            target_1 = open_trade["target_1"]
-
-            target_2 = open_trade["target_2"]
-
-            high = float(row["High"])
-
-            low = float(row["Low"])
-
-
-            exit_price = None
-
-            exit_reason = None
-
-
-            # CALL
-
-            if trade_type == "CALL":
-
-                if low <= stop_loss:
-
-                    exit_price = stop_loss
-
-                    exit_reason = "STOP LOSS"
-
-
-                elif high >= target_2:
-
-                    exit_price = target_2
-
-                    exit_reason = "TARGET 1:3"
-
-
-                elif high >= target_1:
-
-                    exit_price = target_1
-
-                    exit_reason = "TARGET 1:2"
-
-
-            # PUT
-
-            elif trade_type == "PUT":
-
-                if high >= stop_loss:
-
-                    exit_price = stop_loss
-
-                    exit_reason = "STOP LOSS"
-
-
-                elif low <= target_2:
-
-                    exit_price = target_2
-
-                    exit_reason = "TARGET 1:3"
-
-
-                elif low <= target_1:
-
-                    exit_price = target_1
-
-                    exit_reason = "TARGET 1:2"
-
-
-            # CLOSE TRADE
-
-            if exit_price is not None:
-
-                if trade_type == "CALL":
-
-                    points = (
-
-                        exit_price
-                        -
-                        entry
-                    )
-
-                else:
-
-                    points = (
-
-                        entry
-                        -
-                        exit_price
-                    )
-
-
-                result = (
-
-                    "WIN"
-
-                    if points > 0
-
-                    else
-
-                    "LOSS"
-                )
-
-
-                trades.append({
-
-                    "type": trade_type,
-
-                    "entry": round(
-                        entry,
-                        2
-                    ),
-
-                    "exit": round(
-                        exit_price,
-                        2
-                    ),
-
-                    "stop_loss": round(
-                        stop_loss,
-                        2
-                    ),
-
-                    "risk": round(
-                        open_trade["risk"],
-                        2
-                    ),
-
-                    "target_1": round(
-                        target_1,
-                        2
-                    ),
-
-                    "target_2": round(
-                        target_2,
-                        2
-                    ),
-
-                    "points": round(
-                        points,
-                        2
-                    ),
-
-                    "result": result,
-
-                    "exit_reason":
-                    exit_reason,
-
-                    "entry_time":
-                    open_trade["entry_time"],
-
-                    "exit_time":
-                    str(
-                        to_ist_timestamp(
-                            timestamp
-                        )
-                    ),
-                })
-
-
-                open_trade = None
-
-
-        # =================================================
-        # NO NEW TRADE IF RUNNING
-        # =================================================
-
-        if open_trade is not None:
-            continue
-
-
-        # MARKET TIME
-
-        if not is_market_time_allowed(
-            timestamp,
-            tf
-        ):
-            continue
-
-
-        # DAILY LIMIT
-
-        today_count = daily_trade_count.get(
-            date_key,
-            0
+        trade["option_sl"] = (
+            trade["option_entry"]
         )
 
+    # --------------------------------------------------------
+    # TARGET 2
+    # --------------------------------------------------------
 
-        if today_count >= MAX_TRADES_PER_DAY:
-            continue
+    if (
+        current_option_premium >=
+        trade["option_target2"]
+    ):
 
-
-        # ENTER ONLY ON MARKER
-
-        marker = row.get(
-            "MARKER",
-            ""
+        trade["exit_reason"] = (
+            "OPTION TARGET 2 HIT"
         )
 
-
-        if marker not in [
-            "CALL",
-            "PUT",
-        ]:
-            continue
-
-
-        levels = create_trade_levels(
-            marker,
-            row
+        trade["exit_premium"] = (
+            current_option_premium
         )
 
+        close_running_trade()
 
-        if levels is None:
-            continue
+        return
 
+    # --------------------------------------------------------
+    # OPTION STOP LOSS
+    #
+    # If Target 1 was achieved,
+    # this will now be Entry Price
+    # --------------------------------------------------------
 
-        # OPEN TRADE
+    if (
+        current_option_premium <=
+        trade["option_sl"]
+    ):
 
-        open_trade = {
+        if trade["trailing_active"]:
 
-            "type": levels["type"],
-
-            "entry": levels["entry"],
-
-            "stop_loss":
-            levels["stop_loss"],
-
-            "risk":
-            levels["risk"],
-
-            "target_1":
-            levels["target_1"],
-
-            "target_2":
-            levels["target_2"],
-
-            "entry_time":
-            str(
-                to_ist_timestamp(
-                    timestamp
-                )
-            ),
-        }
-
-
-        daily_trade_count[
-            date_key
-        ] = today_count + 1
-
-
-    # =====================================================
-    # RUNNING TRADE
-    # =====================================================
-
-    running_trade = None
-
-
-    if open_trade is not None:
-
-        last_row = data.iloc[-1]
-
-        current_price = float(
-            last_row["Close"]
-        )
-
-
-        if open_trade["type"] == "CALL":
-
-            running_points = (
-
-                current_price
-                -
-                open_trade["entry"]
+            trade["exit_reason"] = (
+                "TRAILING SL HIT - BREAKEVEN"
             )
 
         else:
 
-            running_points = (
-
-                open_trade["entry"]
-                -
-                current_price
+            trade["exit_reason"] = (
+                "OPTION STOP LOSS HIT"
             )
 
+        trade["exit_premium"] = (
+            current_option_premium
+        )
 
-        running_trade = {
+        close_running_trade()
 
-            "type":
-            open_trade["type"],
+        return
 
-            "entry":
-            round(
-                open_trade["entry"],
-                2
-            ),
+    # --------------------------------------------------------
+    # INDEX TARGET 2
+    # --------------------------------------------------------
 
-            "current_price":
-            round(
-                current_price,
-                2
-            ),
+    if trade["signal"] == "CALL":
 
-            "stop_loss":
-            round(
-                open_trade["stop_loss"],
-                2
-            ),
+        if (
+            current_index_price >=
+            trade["index_target2"]
+        ):
 
-            "risk":
-            round(
-                open_trade["risk"],
-                2
-            ),
+            trade["exit_reason"] = (
+                "INDEX TARGET 2 HIT"
+            )
 
-            "target_1":
-            round(
-                open_trade["target_1"],
-                2
-            ),
+            trade["exit_premium"] = (
+                current_option_premium
+            )
 
-            "target_2":
-            round(
-                open_trade["target_2"],
-                2
-            ),
+            close_running_trade()
 
-            "running_points":
-            round(
-                running_points,
-                2
-            ),
+            return
 
-            "entry_time":
-            open_trade["entry_time"],
+    if trade["signal"] == "PUT":
 
-            "status":
-            "RUNNING",
+        if (
+            current_index_price <=
+            trade["index_target2"]
+        ):
+
+            trade["exit_reason"] = (
+                "INDEX TARGET 2 HIT"
+            )
+
+            trade["exit_premium"] = (
+                current_option_premium
+            )
+
+            close_running_trade()
+
+            return
+
+    # --------------------------------------------------------
+    # INDEX STOP LOSS
+    # --------------------------------------------------------
+
+    if trade["signal"] == "CALL":
+
+        if (
+            current_index_price <=
+            trade["index_sl"]
+        ):
+
+            trade["exit_reason"] = (
+                "INDEX STOP LOSS HIT"
+            )
+
+            trade["exit_premium"] = (
+                current_option_premium
+            )
+
+            close_running_trade()
+
+            return
+
+    if trade["signal"] == "PUT":
+
+        if (
+            current_index_price >=
+            trade["index_sl"]
+        ):
+
+            trade["exit_reason"] = (
+                "INDEX STOP LOSS HIT"
+            )
+
+            trade["exit_premium"] = (
+                current_option_premium
+            )
+
+            close_running_trade()
+
+            return
+
+
+# ============================================================
+# CLOSE TRADE
+# ============================================================
+
+def close_running_trade():
+
+    trade = st.session_state.running_trade
+
+    if trade is None:
+        return
+
+    exit_premium = (
+        trade.get("exit_premium")
+    )
+
+    entry = trade["option_entry"]
+
+    points = (
+        exit_premium -
+        entry
+    )
+
+    trade["points"] = points
+
+    trade["status"] = "CLOSED"
+
+    trade["exit_time"] = (
+        datetime.now()
+    )
+
+    closed_trade = trade.copy()
+
+    st.session_state.closed_trades.append(
+        closed_trade
+    )
+
+    st.session_state.running_trade = None
+
+
+# ============================================================
+# BACKTEST STATISTICS
+# ============================================================
+
+def get_backtest_stats():
+
+    trades = (
+        st.session_state.closed_trades
+    )
+
+    if len(trades) == 0:
+
+        return {
+            "closed": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0,
+            "net_points": 0,
+            "target1": 0,
+            "target2": 0
         }
 
+    wins = len([
+        x for x in trades
+        if x.get("points", 0) > 0
+    ])
 
-    # =====================================================
-    # STATISTICS
-    # =====================================================
+    losses = len([
+        x for x in trades
+        if x.get("points", 0) < 0
+    ])
 
-    total_trades = len(trades)
+    breakeven = len([
+        x for x in trades
+        if abs(
+            x.get("points", 0)
+        ) < 0.01
+    ])
 
-
-    wins = sum(
-
-        1
-
-        for trade in trades
-
-        if trade["result"] == "WIN"
-    )
-
-
-    losses = sum(
-
-        1
-
-        for trade in trades
-
-        if trade["result"] == "LOSS"
-    )
-
-
-    target_1_hits = sum(
-
-        1
-
-        for trade in trades
-
-        if trade["exit_reason"]
-        == "TARGET 1:2"
-    )
-
-
-    target_2_hits = sum(
-
-        1
-
-        for trade in trades
-
-        if trade["exit_reason"]
-        == "TARGET 1:3"
-    )
-
+    closed = len(trades)
 
     net_points = sum(
-
-        trade["points"]
-
-        for trade in trades
+        x.get("points", 0)
+        for x in trades
     )
 
+    target1 = len([
+        x for x in trades
+        if x.get("target1_hit", False)
+    ])
+
+    target2 = len([
+        x for x in trades
+        if x.get("exit_reason") ==
+        "OPTION TARGET 2 HIT"
+    ])
 
     win_rate = 0
 
-
-    if total_trades > 0:
+    if closed > 0:
 
         win_rate = (
-
-            wins
-            /
-            total_trades
-
+            wins /
+            closed
         ) * 100
 
-
     return {
-
-        "trades": trades,
-
-        "total_trades": total_trades,
-
+        "closed": closed,
         "wins": wins,
-
         "losses": losses,
-
-        "win_rate": round(
-            win_rate,
-            2
-        ),
-
-        "net_points": round(
-            net_points,
-            2
-        ),
-
-        "target_1_hits":
-        target_1_hits,
-
-        "target_2_hits":
-        target_2_hits,
-
-        "running_trade":
-        running_trade,
+        "breakeven": breakeven,
+        "win_rate": win_rate,
+        "net_points": net_points,
+        "target1": target1,
+        "target2": target2
     }
 
 
-# =========================================================
-# HOME PAGE
-# =========================================================
+# ============================================================
+# HEADER
+# ============================================================
 
-@app.route("/")
-def home():
+st.title("📈 Personal Scalping Scanner")
 
-    return r"""
-<!DOCTYPE html>
 
-<html lang="en">
+# ============================================================
+# CONTROLS
+# ============================================================
 
-<head>
+col1, col2 = st.columns(2)
 
-<meta charset="UTF-8">
+with col1:
 
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1.0">
-
-<title>
-Personal Scalping Scanner
-</title>
-
-<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    padding: 12px;
-    background: #080c12;
-    color: #ffffff;
-    font-family: Arial, sans-serif;
-}
-
-h1 {
-    font-size: 22px;
-    margin: 8px 0 15px;
-}
-
-h2 {
-    font-size: 18px;
-    margin: 20px 0 10px;
-}
-
-.card {
-    background: #111923;
-    border: 1px solid #263241;
-    border-radius: 12px;
-    padding: 14px;
-    margin-bottom: 12px;
-}
-
-.tf {
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    padding-bottom: 6px;
-}
-
-button {
-    padding: 9px 12px;
-    border-radius: 8px;
-    border: 1px solid #34465a;
-    background: #172331;
-    color: white;
-    cursor: pointer;
-    white-space: nowrap;
-}
-
-button.active {
-    background: #2463eb;
-}
-
-button:active {
-    transform: scale(0.97);
-}
-
-#chart {
-    width: 100%;
-    height: 500px;
-}
-
-.grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-}
-
-.box {
-    background: #172331;
-    padding: 12px;
-    border-radius: 8px;
-}
-
-.label {
-    font-size: 12px;
-    color: #aab7c4;
-}
-
-.value {
-    font-size: 18px;
-    margin-top: 5px;
-    font-weight: bold;
-}
-
-.call {
-    color: #4ade80;
-}
-
-.put {
-    color: #fb7185;
-}
-
-.wait {
-    color: #facc15;
-}
-
-.good {
-    color: #4ade80;
-}
-
-.bad {
-    color: #fb7185;
-}
-
-.running {
-    color: #38bdf8;
-}
-
-.small {
-    font-size: 12px;
-    color: #aab7c4;
-}
-
-.trade-row {
-    padding: 10px 0;
-    border-bottom: 1px solid #263241;
-}
-
-</style>
-
-</head>
-
-<body>
-
-
-<h1>
-📈 Personal Scalping Scanner
-</h1>
-
-
-<div class="card">
-
-<div
-id="indices"
-class="tf"></div>
-
-<br>
-
-<div
-id="timeframes"
-class="tf"></div>
-
-</div>
-
-
-<!-- SCANNER -->
-
-<div class="card">
-
-<div class="grid">
-
-
-<div class="box">
-
-<div class="label">
-Signal
-</div>
-
-<div
-id="signal"
-class="value">
-Loading...
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Trade Status
-</div>
-
-<div
-id="tradeStatus"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Price
-</div>
-
-<div
-id="price"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-EMA 9
-</div>
-
-<div
-id="ema9"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-EMA 15
-</div>
-
-<div
-id="ema15"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-VWAP (OHLC/4)
-</div>
-
-<div
-id="vwap"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Stop Loss
-</div>
-
-<div
-id="sl"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Risk Points
-</div>
-
-<div
-id="risk"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Target 1 (1:2)
-</div>
-
-<div
-id="target1"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Target 2 (1:3)
-</div>
-
-<div
-id="target2"
-class="value">
--
-</div>
-
-</div>
-
-
-</div>
-
-</div>
-
-
-<h2>
-📊 Index Chart
-</h2>
-
-<div class="card">
-
-<div id="chart"></div>
-
-</div>
-
-
-<h2>
-🔵 Running Trade
-</h2>
-
-<div class="card">
-
-<div
-id="runningTrade"
-class="small">
-
-No running trade.
-
-</div>
-
-</div>
-
-
-<h2>
-📈 Backtest (Closed Trades Only)
-</h2>
-
-<div class="card">
-
-<div class="grid">
-
-
-<div class="box">
-
-<div class="label">
-Closed Trades
-</div>
-
-<div
-id="totalTrades"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Wins
-</div>
-
-<div
-id="wins"
-class="value good">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Losses
-</div>
-
-<div
-id="losses"
-class="value bad">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Win Rate
-</div>
-
-<div
-id="winRate"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Net Points
-</div>
-
-<div
-id="netPoints"
-class="value">
--
-</div>
-
-</div>
-
-
-<div class="box">
-
-<div class="label">
-Target 1 / Target 2
-</div>
-
-<div
-id="targets"
-class="value">
--
-</div>
-
-</div>
-
-
-</div>
-
-</div>
-
-
-<div class="card">
-
-<h2>
-Recent Closed Trades
-</h2>
-
-<div id="trades"></div>
-
-</div>
-
-
-<script>
-
-
-let selectedIndex = "NIFTY 50";
-
-let selectedTF = "5m";
-
-
-let chart = null;
-
-let candleSeries = null;
-
-let ema9Series = null;
-
-let ema15Series = null;
-
-let vwapSeries = null;
-
-
-const indices = [
-
-    "NIFTY 50",
-
-    "BANK NIFTY",
-
-    "SENSEX"
-
-];
-
-
-const timeframes = [
-
-    "1m",
-
-    "2m",
-
-    "3m",
-
-    "5m",
-
-    "15m",
-
-    "1h",
-
-    "2h",
-
-    "1d",
-
-    "1wk"
-
-];
-
-
-function createButtons() {
-
-
-    const indexDiv =
-    document.getElementById(
-        "indices"
-    );
-
-
-    indexDiv.innerHTML = "";
-
-
-    indices.forEach(
-        name => {
-
-
-            const button =
-            document.createElement(
-                "button"
-            );
-
-
-            button.textContent =
-            name;
-
-
-            if (
-                name === selectedIndex
-            ) {
-
-                button.classList.add(
-                    "active"
-                );
-
-            }
-
-
-            button.onclick = () => {
-
-
-                selectedIndex = name;
-
-                createButtons();
-
-                loadData();
-
-            };
-
-
-            indexDiv.appendChild(
-                button
-            );
-
-        }
-    );
-
-
-    const tfDiv =
-    document.getElementById(
-        "timeframes"
-    );
-
-
-    tfDiv.innerHTML = "";
-
-
-    timeframes.forEach(
-        tf => {
-
-
-            const button =
-            document.createElement(
-                "button"
-            );
-
-
-            button.textContent = tf;
-
-
-            if (
-                tf === selectedTF
-            ) {
-
-                button.classList.add(
-                    "active"
-                );
-
-            }
-
-
-            button.onclick = () => {
-
-
-                selectedTF = tf;
-
-                createButtons();
-
-                loadData();
-
-            };
-
-
-            tfDiv.appendChild(
-                button
-            );
-
-        }
-    );
-}
-
-
-function createChart() {
-
-
-    const container =
-    document.getElementById(
-        "chart"
-    );
-
-
-    container.innerHTML = "";
-
-
-    chart =
-    LightweightCharts.createChart(
-
-        container,
-
-        {
-
-            width:
-            container.clientWidth,
-
-            height:
-            500,
-
-
-            layout: {
-
-                background: {
-
-                    type: "solid",
-
-                    color:
-                    "#111923"
-
-                },
-
-                textColor:
-                "#d1d4dc"
-
-            },
-
-
-            grid: {
-
-                vertLines: {
-
-                    color:
-                    "#202b38"
-
-                },
-
-                horzLines: {
-
-                    color:
-                    "#202b38"
-
-                }
-
-            },
-
-
-            rightPriceScale: {
-
-                borderColor:
-                "#263241"
-
-            },
-
-
-            timeScale: {
-
-                borderColor:
-                "#263241",
-
-                timeVisible:
-                true,
-
-                secondsVisible:
-                false
-
-            }
-
-        }
-    );
-
-
-    candleSeries =
-    chart.addCandlestickSeries({
-
-        upColor:
-        "#22c55e",
-
-        downColor:
-        "#ef4444",
-
-        borderUpColor:
-        "#22c55e",
-
-        borderDownColor:
-        "#ef4444",
-
-        wickUpColor:
-        "#22c55e",
-
-        wickDownColor:
-        "#ef4444"
-
-    });
-
-
-    ema9Series =
-    chart.addLineSeries({
-
-        color:
-        "#3b82f6",
-
-        lineWidth:
-        2,
-
-        title:
-        "EMA 9"
-
-    });
-
-
-    ema15Series =
-    chart.addLineSeries({
-
-        color:
-        "#f59e0b",
-
-        lineWidth:
-        2,
-
-        title:
-        "EMA 15"
-
-    });
-
-
-    vwapSeries =
-    chart.addLineSeries({
-
-        color:
-        "#a855f7",
-
-        lineWidth:
-        2,
-
-        title:
-        "VWAP"
-
-    });
-
-
-    window.addEventListener(
-        "resize",
-        () => {
-
-            if (
-                chart
-            ) {
-
-                chart.applyOptions({
-
-                    width:
-                    container.clientWidth
-
-                });
-
-            }
-
-        }
-    );
-}
-
-
-function formatNumber(value) {
-
-
-    if (
-
-        value === null
-
-        ||
-
-        value === undefined
-
-        ||
-
-        Number.isNaN(
-            Number(value)
-        )
-
-    ) {
-
-        return "-";
-
-    }
-
-
-    return Number(
-        value
-    ).toFixed(2);
-}
-
-
-async function loadData() {
-
-
-    try {
-
-
-        document.getElementById(
-            "signal"
-        ).textContent =
-        "Loading...";
-
-
-        const response =
-        await fetch(
-
-            "/api/data?index="
-
-            +
-
-            encodeURIComponent(
-                selectedIndex
-            )
-
-            +
-
-            "&tf="
-
-            +
-
-            encodeURIComponent(
-                selectedTF
-            )
-
-        );
-
-
-        if (!response.ok) {
-
-            throw new Error(
-                "Server error: "
-                +
-                response.status
-            );
-
-        }
-
-
-        const data =
-        await response.json();
-
-
-        if (
-            data.error
-        ) {
-
-            throw new Error(
-                data.error
-            );
-
-        }
-
-
-        updateScanner(
-            data.scanner
-        );
-
-
-        updateChart(
-            data.chart
-        );
-
-
-        updateBacktest(
-            data.backtest
-        );
-
-    }
-
-    catch (error) {
-
-
-        console.error(
-            error
-        );
-
-
-        const signalElement =
-        document.getElementById(
-            "signal"
-        );
-
-
-        signalElement.textContent =
-        "ERROR";
-
-
-        signalElement.className =
-        "value bad";
-
-
-        document.getElementById(
-            "tradeStatus"
-        ).textContent =
-        error.message;
-
-    }
-}
-
-
-function updateScanner(scanner) {
-
-
-    const signal =
-    scanner.signal || "WAIT";
-
-
-    const signalElement =
-    document.getElementById(
-        "signal"
-    );
-
-
-    signalElement.textContent =
-    signal;
-
-
-    signalElement.className =
-
-    "value "
-
-    +
-
-    (
-
-        signal === "CALL"
-
-        ?
-
-        "call"
-
-        :
-
-        signal === "PUT"
-
-        ?
-
-        "put"
-
-        :
-
-        "wait"
-
-    );
-
-
-    document.getElementById(
-        "price"
-    ).textContent =
-    formatNumber(
-        scanner.price
-    );
-
-
-    document.getElementById(
-        "ema9"
-    ).textContent =
-    formatNumber(
-        scanner.ema9
-    );
-
-
-    document.getElementById(
-        "ema15"
-    ).textContent =
-    formatNumber(
-        scanner.ema15
-    );
-
-
-    document.getElementById(
-        "vwap"
-    ).textContent =
-    formatNumber(
-        scanner.vwap
-    );
-
-
-    document.getElementById(
-        "sl"
-    ).textContent =
-    formatNumber(
-        scanner.stop_loss
-    );
-
-
-    document.getElementById(
-        "risk"
-    ).textContent =
-    formatNumber(
-        scanner.risk
-    );
-
-
-    document.getElementById(
-        "target1"
-    ).textContent =
-    formatNumber(
-        scanner.target_1
-    );
-
-
-    document.getElementById(
-        "target2"
-    ).textContent =
-    formatNumber(
-        scanner.target_2
-    );
-
-
-    const statusElement =
-    document.getElementById(
-        "tradeStatus"
-    );
-
-
-    statusElement.textContent =
-
-    scanner.message
-    ||
-    "WAIT";
-
-
-    statusElement.className =
-
-    scanner.trade_allowed
-
-    ?
-
-    "value call"
-
-    :
-
-    "value wait";
-}
-
-
-function updateChart(chartData) {
-
-
-    if (
-        !chart
-        ||
-        !candleSeries
-    ) {
-
-        createChart();
-
-    }
-
-
-    if (
-
-        !chartData
-
-        ||
-
-        chartData.length === 0
-
-    ) {
-
-        return;
-
-    }
-
-
-    const candles =
-    chartData.map(
-        x => ({
-
-            time: x.time,
-
-            open: x.open,
-
-            high: x.high,
-
-            low: x.low,
-
-            close: x.close
-
-        })
-    );
-
-
-    const ema9 =
-    chartData.map(
-        x => ({
-
-            time: x.time,
-
-            value: x.ema9
-
-        })
-    );
-
-
-    const ema15 =
-    chartData.map(
-        x => ({
-
-            time: x.time,
-
-            value: x.ema15
-
-        })
-    );
-
-
-    const vwap =
-    chartData.map(
-        x => ({
-
-            time: x.time,
-
-            value: x.vwap
-
-        })
-    );
-
-
-    candleSeries.setData(
-        candles
-    );
-
-
-    ema9Series.setData(
-        ema9
-    );
-
-
-    ema15Series.setData(
-        ema15
-    );
-
-
-    vwapSeries.setData(
-        vwap
-    );
-
-
-    const markers = [];
-
-
-    chartData.forEach(
-        x => {
-
-
-            if (
-                x.marker === "CALL"
-            ) {
-
-                markers.push({
-
-                    time:
-                    x.time,
-
-                    position:
-                    "belowBar",
-
-                    color:
-                    "#22c55e",
-
-                    shape:
-                    "arrowUp",
-
-                    text:
-                    "CALL"
-
-                });
-
-            }
-
-
-            if (
-                x.marker === "PUT"
-            ) {
-
-                markers.push({
-
-                    time:
-                    x.time,
-
-                    position:
-                    "aboveBar",
-
-                    color:
-                    "#ef4444",
-
-                    shape:
-                    "arrowDown",
-
-                    text:
-                    "PUT"
-
-                });
-
-            }
-
-        }
-    );
-
-
-    if (
-        typeof candleSeries.setMarkers
-        ===
-        "function"
-    ) {
-
-        candleSeries.setMarkers(
-            markers
-        );
-
-    }
-
-
-    chart.timeScale().fitContent();
-}
-
-
-function updateBacktest(backtest) {
-
-
-    document.getElementById(
-        "totalTrades"
-    ).textContent =
-    backtest.total_trades;
-
-
-    document.getElementById(
-        "wins"
-    ).textContent =
-    backtest.wins;
-
-
-    document.getElementById(
-        "losses"
-    ).textContent =
-    backtest.losses;
-
-
-    document.getElementById(
-        "winRate"
-    ).textContent =
-
-    backtest.win_rate
-    +
-    "%";
-
-
-    const netElement =
-    document.getElementById(
-        "netPoints"
-    );
-
-
-    netElement.textContent =
-    backtest.net_points;
-
-
-    netElement.className =
-
-    "value "
-
-    +
-
-    (
-
-        backtest.net_points >= 0
-
-        ?
-
-        "good"
-
-        :
-
-        "bad"
-
-    );
-
-
-    document.getElementById(
-        "targets"
-    ).textContent =
-
-    backtest.target_1_hits
-
-    +
-
-    " / "
-
-    +
-
-    backtest.target_2_hits;
-
-
-    # RUNNING TRADE
-
-    const runningDiv =
-    document.getElementById(
-        "runningTrade"
-    );
-
-
-    const running =
-    backtest.running_trade;
-
-
-    if (
-        running
-    ) {
-
-        const pointsClass =
-
-        running.running_points >= 0
-
-        ?
-
-        "good"
-
-        :
-
-        "bad";
-
-
-        runningDiv.innerHTML =
-
-        "<div class='trade-row'>"
-
-        +
-
-        "<b class='running'>"
-
-        +
-
-        running.status
-
-        +
-
-        " "
-
-        +
-
-        running.type
-
-        +
-
-        "</b><br><br>"
-
-        +
-
-        "Entry: "
-
-        +
-
-        running.entry
-
-        +
-
-        " | Current: "
-
-        +
-
-        running.current_price
-
-        +
-
-        "<br>"
-
-        +
-
-        "SL: "
-
-        +
-
-        running.stop_loss
-
-        +
-
-        " | Risk: "
-
-        +
-
-        running.risk
-
-        +
-
-        "<br>"
-
-        +
-
-        "Target 1: "
-
-        +
-
-        running.target_1
-
-        +
-
-        " | Target 2: "
-
-        +
-
-        running.target_2
-
-        +
-
-        "<br>"
-
-        +
-
-        "Running Points: "
-
-        +
-
-        "<span class='"
-
-        +
-
-        pointsClass
-
-        +
-
-        "'>"
-
-        +
-
-        running.running_points
-
-        +
-
-        "</span>"
-
-        +
-
-        "</div>";
-
-    }
-
-    else {
-
-        runningDiv.innerHTML =
-        "No running trade.";
-
-    }
-
-
-    # CLOSED TRADES
-
-    const tradesDiv =
-    document.getElementById(
-        "trades"
-    );
-
-
-    tradesDiv.innerHTML = "";
-
-
-    const trades =
-
-    [...backtest.trades]
-
-    .reverse()
-
-    .slice(
-        0,
-        30
-    );
-
-
-    if (
-        trades.length === 0
-    ) {
-
-        tradesDiv.innerHTML =
-
-        "<div class='small'>No closed trades found.</div>";
-
-        return;
-
-    }
-
-
-    trades.forEach(
-        trade => {
-
-
-            const div =
-            document.createElement(
-                "div"
-            );
-
-
-            div.className =
-            "trade-row";
-
-
-            const resultClass =
-
-            trade.result === "WIN"
-
-            ?
-
-            "good"
-
-            :
-
-            "bad";
-
-
-            div.innerHTML =
-
-            "<b>"
-
-            +
-
-            trade.type
-
-            +
-
-            "</b> | Entry: "
-
-            +
-
-            trade.entry
-
-            +
-
-            " | SL: "
-
-            +
-
-            trade.stop_loss
-
-            +
-
-            " | Exit: "
-
-            +
-
-            trade.exit
-
-            +
-
-            "<br>"
-
-            +
-
-            "Risk: "
-
-            +
-
-            trade.risk
-
-            +
-
-            " | Points: "
-
-            +
-
-            trade.points
-
-            +
-
-            " | "
-
-            +
-
-            "<span class='"
-
-            +
-
-            resultClass
-
-            +
-
-            "'>"
-
-            +
-
-            trade.result
-
-            +
-
-            "</span>"
-
-            +
-
-            "<br>"
-
-            +
-
-            "<span class='small'>"
-
-            +
-
-            trade.exit_reason
-
-            +
-
-            "</span>";
-
-
-            tradesDiv.appendChild(
-                div
-            );
-
-        }
-    );
-}
-
-
-createButtons();
-
-createChart();
-
-loadData();
-
-
-setInterval(
-
-    loadData,
-
-    60000
-
-);
-
-
-</script>
-
-</body>
-
-</html>
-"""
-
-
-# =========================================================
-# API
-# =========================================================
-
-@app.route("/api/data")
-def api_data():
-
-    try:
-
-        index_name = request.args.get(
-            "index",
-            "NIFTY 50"
-        )
-
-        tf = request.args.get(
-            "tf",
-            "5m"
-        )
-
-
-        if index_name not in INDICES:
-
-            return jsonify({
-
-                "error":
-                "Invalid index"
-
-            }), 400
-
-
-        if tf not in TIMEFRAMES:
-
-            return jsonify({
-
-                "error":
-                "Invalid timeframe"
-
-            }), 400
-
-
-        symbol = INDICES[
-            index_name
-        ]
-
-
-        raw_data = download_data(
-            symbol,
-            tf
-        )
-
-
-        if (
-
-            raw_data is None
-
-            or
-
-            raw_data.empty
-
-        ):
-
-            return jsonify({
-
-                "error":
-                "Market data not available"
-
-            }), 503
-
-
-        # Calculate once and use everywhere
-
-        data = calculate_all_signals(
-            raw_data,
-            tf
-        )
-
-
-        if data is None or data.empty:
-
-            return jsonify({
-
-                "error":
-                "Indicator calculation failed"
-
-            }), 500
-
-
-        scanner = calculate_scanner(
-            data,
-            tf
-        )
-
-
-        chart = chart_json(
-            data
-        )
-
-
-        backtest = run_backtest(
-            data,
-            tf
-        )
-
-
-        return jsonify({
-
-            "index":
-            index_name,
-
-            "timeframe":
-            tf,
-
-            "scanner":
-            scanner,
-
-            "chart":
-            chart,
-
-            "backtest":
-            backtest,
-        })
-
-
-    except Exception as e:
-
-        print(
-            "API ERROR:",
-            e
-        )
-
-        traceback.print_exc()
-
-
-        return jsonify({
-
-            "error":
-            str(e)
-
-        }), 500
-
-
-# =========================================================
-# HEALTH
-# =========================================================
-
-@app.route("/api/health")
-def api_health():
-
-    return jsonify({
-
-        "status":
-        "ok"
-
-    })
-
-
-# =========================================================
-# RUN
-# =========================================================
-
-if __name__ == "__main__":
-
-    app.run(
-
-        host="0.0.0.0",
-
-        port=5000,
-
-        debug=False
+    index_name = st.selectbox(
+        "Select Index",
+        list(INDEX_CONFIG.keys()),
+        index=0
     )
+
+with col2:
+
+    timeframe = st.selectbox(
+        "Select Timeframe",
+        list(TIMEFRAME_CONFIG.keys()),
+        index=2
+    )
+
+
+# ============================================================
+# GET MARKET DATA
+# ============================================================
+
+symbol = INDEX_CONFIG[
+    index_name
+]["yahoo"]
+
+df = get_market_data(
+    symbol,
+    timeframe
+)
+
+
+if df.empty:
+
+    st.error(
+        "Market data load नहीं हो पाया।"
+    )
+
+    st.stop()
+
+
+# ============================================================
+# CALCULATE INDICATORS
+# ============================================================
+
+data = calculate_indicators(df)
+
+signal_data = get_signal(data)
+
+if signal_data is None:
+
+    st.warning(
+        "Signal calculate करने के लिए पर्याप्त data नहीं है।"
+    )
+
+    st.stop()
+
+
+signal = signal_data["signal"]
+
+price = signal_data["price"]
+
+ema9 = signal_data["ema9"]
+
+ema15 = signal_data["ema15"]
+
+vwap = signal_data["vwap"]
+
+
+# ============================================================
+# INDEX LEVELS
+# ============================================================
+
+index_levels = (
+    calculate_index_levels(
+        signal_data,
+        data
+    )
+)
+
+
+# ============================================================
+# GET OPTION CONTRACT
+# ============================================================
+
+option_contract = None
+option_levels = None
+
+if signal == "CALL":
+
+    option_chain = get_option_chain(
+        index_name
+    )
+
+    option_contract = (
+        find_option_contract(
+            option_chain,
+            price,
+            "CE",
+            index_name
+        )
+    )
+
+elif signal == "PUT":
+
+    option_chain = get_option_chain(
+        index_name
+    )
+
+    option_contract = (
+        find_option_contract(
+            option_chain,
+            price,
+            "PE",
+            index_name
+        )
+    )
+
+if option_contract is not None:
+
+    option_levels = (
+        calculate_option_levels(
+            option_contract["premium"]
+        )
+    )
+
+
+# ============================================================
+# UPDATE RUNNING TRADE
+# ============================================================
+
+if st.session_state.running_trade is not None:
+
+    running = (
+        st.session_state.running_trade
+    )
+
+    current_type = (
+        running["option_type"]
+    )
+
+    option_chain_live = get_option_chain(
+        index_name
+    )
+
+    current_option = (
+        find_option_contract(
+            option_chain_live,
+            price,
+            current_type,
+            index_name
+        )
+    )
+
+    update_running_trade(
+        price,
+        current_option
+    )
+
+
+# ============================================================
+# CREATE NEW TRADE
+# ============================================================
+
+if (
+    signal in ["CALL", "PUT"]
+    and
+    st.session_state.running_trade is None
+    and
+    option_contract is not None
+    and
+    option_levels is not None
+):
+
+    last_signal = (
+        st.session_state.last_signal
+    )
+
+    signal_time = str(
+        signal_data["time"]
+    )
+
+    # New trade only if signal changes
+    if (
+        last_signal != signal
+        or
+        st.session_state.last_trade_signal_time
+        != signal_time
+    ):
+
+        new_trade = create_trade(
+            signal_data,
+            index_levels,
+            option_contract,
+            option_levels
+        )
+
+        if new_trade is not None:
+
+            st.session_state.running_trade = (
+                new_trade
+            )
+
+            st.session_state.last_signal = (
+                signal
+            )
+
+            st.session_state.last_trade_signal_time = (
+                signal_time
+            )
+
+
+# ============================================================
+# SIGNAL COLOR
+# ============================================================
+
+if signal == "CALL":
+
+    signal_class = "signal-call"
+
+elif signal == "PUT":
+
+    signal_class = "signal-put"
+
+else:
+
+    signal_class = "signal-wait"
+
+
+# ============================================================
+# TOP METRICS
+# ============================================================
+
+st.markdown("### Current Signal")
+
+m1, m2 = st.columns(2)
+
+with m1:
+
+    st.markdown(
+        metric_box(
+            "Signal",
+            f"{signal} ({signal_data['strength']})",
+            signal_class
+        ),
+        unsafe_allow_html=True
+    )
+
+with m2:
+
+    trade_status = (
+        "RUNNING"
+        if st.session_state.running_trade
+        else "WAIT"
+    )
+
+    st.markdown(
+        metric_box(
+            "Trade Status",
+            trade_status
+        ),
+        unsafe_allow_html=True
+    )
+
+
+c1, c2 = st.columns(2)
+
+with c1:
+
+    st.markdown(
+        metric_box(
+            "Price",
+            format_number(price)
+        ),
+        unsafe_allow_html=True
+    )
+
+with c2:
+
+    st.markdown(
+        metric_box(
+            "EMA 9",
+            format_number(ema9)
+        ),
+        unsafe_allow_html=True
+    )
+
+
+c1, c2 = st.columns(2)
+
+with c1:
+
+    st.markdown(
+        metric_box(
+            "EMA 15",
+            format_number(ema15)
+        ),
+        unsafe_allow_html=True
+    )
+
+with c2:
+
+    st.markdown(
+        metric_box(
+            "VWAP (OHLC/4)",
+            format_number(vwap)
+        ),
+        unsafe_allow_html=True
+    )
+
+
+c1, c2 = st.columns(2)
+
+with c1:
+
+    index_sl_text = (
+        format_number(
+            index_levels["stop_loss"]
+        )
+        if index_levels["stop_loss"]
+        else "-"
+    )
+
+    st.markdown(
+        metric_box(
+            "Index Stop Loss",
+            index_sl_text
+        ),
+        unsafe_allow_html=True
+    )
+
+with c2:
+
+    risk_text = (
+        format_number(
+            index_levels["risk"]
+        )
+        if index_levels["risk"]
+        else "-"
+    )
+
+    st.markdown(
+        metric_box(
+            "Risk Points",
+            risk_text
+        ),
+        unsafe_allow_html=True
+    )
+
+
+c1, c2 = st.columns(2)
+
+with c1:
+
+    target1_text = (
+        format_number(
+            index_levels["target1"]
+        )
+        if index_levels["target1"]
+        else "-"
+    )
+
+    st.markdown(
+        metric_box(
+            "Target 1 (1:1)",
+            target1_text
+        ),
+        unsafe_allow_html=True
+    )
+
+with c2:
+
+    target2_text = (
+        format_number(
+            index_levels["target2"]
+        )
+        if index_levels["target2"]
+        else "-"
+    )
+
+    st.markdown(
+        metric_box(
+            "Target 2 (1:2)",
+            target2_text
+        ),
+        unsafe_allow_html=True
+    )
+
+
+# ============================================================
+# SIGNAL CONDITIONS
+# ============================================================
+
+st.markdown(
+    f"**Signal Condition:** "
+    f"{signal_data['reason']}"
+)
+
+st.caption(
+    f"CALL Score: {signal_data['call_score']} | "
+    f"PUT Score: {signal_data['put_score']}"
+)
+
+
+# ============================================================
+# OPTION PREMIUM DETAILS
+# ============================================================
+
+st.markdown("### 🎯 Live Option Premium")
+
+if option_contract is not None:
+
+    o1, o2 = st.columns(2)
+
+    with o1:
+
+        st.markdown(
+            metric_box(
+                "Selected Option",
+                option_contract["symbol"]
+            ),
+            unsafe_allow_html=True
+        )
+
+    with o2:
+
+        st.markdown(
+            metric_box(
+                "Expiry",
+                option_contract["expiry"]
+            ),
+            unsafe_allow_html=True
+        )
+
+
+    o1, o2 = st.columns(2)
+
+    with o1:
+
+        st.markdown(
+            metric_box(
+                "Actual NSE Premium",
+                format_number(
+                    option_contract["premium"]
+                )
+            ),
+            unsafe_allow_html=True
+        )
+
+    with o2:
+
+        st.markdown(
+            metric_box(
+                "Strike",
+                format_number(
+                    option_contract["strike"],
+                    0
+                )
+            ),
+            unsafe_allow_html=True
+        )
+
+
+    if option_levels is not None:
+
+        o1, o2 = st.columns(2)
+
+        with o1:
+
+            st.markdown(
+                metric_box(
+                    "Option Premium SL",
+                    format_number(
+                        option_levels["sl"]
+                    )
+                ),
+                unsafe_allow_html=True
+            )
+
+        with o2:
+
+            st.markdown(
+                metric_box(
+                    "Option Premium Target 1",
+                    format_number(
+                        option_levels["target1"]
+                    )
+                ),
+                unsafe_allow_html=True
+            )
+
+
+        o1, o2 = st.columns(2)
+
+        with o1:
+
+            st.markdown(
+                metric_box(
+                    "Option Premium Target 2",
+                    format_number(
+                        option_levels["target2"]
+                    )
+                ),
+                unsafe_allow_html=True
+            )
+
+        with o2:
+
+            st.markdown(
+                metric_box(
+                    "Trailing Rule",
+                    "1:1 → SL = Entry Price"
+                ),
+                unsafe_allow_html=True
+            )
+
+else:
+
+    st.warning(
+        "NSE option-chain से option premium अभी उपलब्ध नहीं है।"
+    )
+
+
+# ============================================================
+# CHART
+# ============================================================
+
+st.markdown("### 📊 Index Chart")
+
+chart_data = data.tail(150).copy()
+
+fig = go.Figure()
+
+
+# ------------------------------------------------------------
+# CANDLESTICK
+# ------------------------------------------------------------
+
+fig.add_trace(
+    go.Candlestick(
+        x=chart_data.index,
+        open=chart_data["Open"],
+        high=chart_data["High"],
+        low=chart_data["Low"],
+        close=chart_data["Close"],
+        name="Price"
+    )
+)
+
+
+# ------------------------------------------------------------
+# EMA 9
+# ------------------------------------------------------------
+
+fig.add_trace(
+    go.Scatter(
+        x=chart_data.index,
+        y=chart_data["EMA9"],
+        mode="lines",
+        name="EMA 9",
+        line=dict(width=1.5)
+    )
+)
+
+
+# ------------------------------------------------------------
+# EMA 15
+# ------------------------------------------------------------
+
+fig.add_trace(
+    go.Scatter(
+        x=chart_data.index,
+        y=chart_data["EMA15"],
+        mode="lines",
+        name="EMA 15",
+        line=dict(width=1.5)
+    )
+)
+
+
+# ------------------------------------------------------------
+# VWAP
+# ------------------------------------------------------------
+
+fig.add_trace(
+    go.Scatter(
+        x=chart_data.index,
+        y=chart_data["VWAP"],
+        mode="lines",
+        name="VWAP",
+        line=dict(width=1.5)
+    )
+)
+
+
+# ============================================================
+# CHART LINES
+# ============================================================
+
+if signal in ["CALL", "PUT"]:
+
+    entry = index_levels["entry"]
+    sl = index_levels["stop_loss"]
+    t1 = index_levels["target1"]
+    t2 = index_levels["target2"]
+
+    # ENTRY
+    fig.add_hline(
+        y=entry,
+        line_dash="dot",
+        annotation_text=f"{signal} ENTRY {entry:.2f}"
+    )
+
+    # STOP LOSS
+    fig.add_hline(
+        y=sl,
+        line_dash="dash",
+        annotation_text=f"SL {sl:.2f}"
+    )
+
+    # TARGET 1
+    fig.add_hline(
+        y=t1,
+        line_dash="dash",
+        annotation_text=f"T1 {t1:.2f}"
+    )
+
+    # TARGET 2
+    fig.add_hline(
+        y=t2,
+        line_dash="dash",
+        annotation_text=f"T2 {t2:.2f}"
+    )
+
+    # --------------------------------------------------------
+    # ENTRY ARROW
+    # --------------------------------------------------------
+
+    arrow_symbol = (
+        "triangle-up"
+        if signal == "CALL"
+        else "triangle-down"
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=[chart_data.index[-1]],
+            y=[entry],
+            mode="markers+text",
+            marker=dict(
+                size=16,
+                symbol=arrow_symbol
+            ),
+            text=[signal],
+            textposition="top center",
+            name=f"{signal} ENTRY"
+        )
+    )
+
+
+# ============================================================
+# RUNNING TRADE LEVELS ON CHART
+# ============================================================
+
+running = (
+    st.session_state.running_trade
+)
+
+if running is not None:
+
+    fig.add_hline(
+        y=running["index_entry"],
+        line_dash="dot",
+        annotation_text=(
+            f"RUNNING {running['signal']} "
+            f"ENTRY"
+        )
+    )
+
+    fig.add_hline(
+        y=running["index_sl"],
+        line_dash="dash",
+        annotation_text="INDEX SL"
+    )
+
+    if running["signal"] == "CALL":
+
+        fig.add_hline(
+            y=running["index_target1"],
+            line_dash="dot",
+            annotation_text="INDEX T1"
+        )
+
+        fig.add_hline(
+            y=running["index_target2"],
+            line_dash="dash",
+            annotation_text="INDEX T2"
+        )
+
+    else:
+
+        fig.add_hline(
+            y=running["index_target1"],
+            line_dash="dot",
+            annotation_text="INDEX T1"
+        )
+
+        fig.add_hline(
+            y=running["index_target2"],
+            line_dash="dash",
+            annotation_text="INDEX T2"
+        )
+
+
+fig.update_layout(
+
+    height=620,
+
+    margin=dict(
+        l=10,
+        r=10,
+        t=30,
+        b=10
+    ),
+
+    xaxis_rangeslider_visible=False,
+
+    template="plotly_dark",
+
+    legend=dict(
+        orientation="h"
+    )
+
+)
+
+
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
+
+
+# ============================================================
+# RUNNING TRADE
+# ============================================================
+
+st.markdown("### 🔵 Running Trade")
+
+running = (
+    st.session_state.running_trade
+)
+
+if running is None:
+
+    st.info(
+        "No running trade."
+    )
+
+else:
+
+    r1, r2 = st.columns(2)
+
+    with r1:
+
+        st.markdown(
+            metric_box(
+                "Trade",
+                running["signal"]
+            ),
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            metric_box(
+                "Option",
+                running["option_symbol"]
+            ),
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            metric_box(
+                "Option Entry Premium",
+                format_number(
+                    running["option_entry"]
+                )
+            ),
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            metric_box(
+                "Current Premium",
+                format_number(
+                    running["last_premium"]
+                )
+            ),
+            unsafe_allow_html=True
+        )
+
+    with r2:
+
+        st.markdown(
+            metric_box(
+                "Current SL",
+                format_number(
+                    running["option_sl"]
+                )
+            ),
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            metric_box(
+                "Target 1",
+                format_number(
+                    running["option_target1"]
+                )
+            ),
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            metric_box(
+                "Target 2",
+                format_number(
+                    running["option_target2"]
+                )
+            ),
+            unsafe_allow_html=True
+        )
+
+        trailing_text = (
+            "ACTIVE → SL = ENTRY PRICE"
+            if running["trailing_active"]
+            else "Waiting for 1:1"
+        )
+
+        st.markdown(
+            metric_box(
+                "Trailing Stop Loss",
+                trailing_text
+            ),
+            unsafe_allow_html=True
+        )
+
+
+    if running["target1_hit"]:
+
+        st.success(
+            "✅ Target 1 / 1:1 achieved — "
+            "Stop Loss अब Entry Price पर है "
+            "(Breakeven Trailing SL)."
+        )
+
+    else:
+
+        st.warning(
+            "⏳ 1:1 का इंतजार — "
+            "Target 1 hit होते ही "
+            "SL Entry Price पर shift होगा।"
+        )
+
+
+# ============================================================
+# BACKTEST
+# ============================================================
+
+st.markdown(
+    "### 📉 Backtest (Closed Trades Only)"
+)
+
+stats = get_backtest_stats()
+
+b1, b2 = st.columns(2)
+
+with b1:
+
+    st.markdown(
+        metric_box(
+            "Closed Trades",
+            stats["closed"]
+        ),
+        unsafe_allow_html=True
+    )
+
+with b2:
+
+    st.markdown(
+        metric_box(
+            "Wins",
+            stats["wins"]
+        ),
+        unsafe_allow_html=True
+    )
+
+
+b1, b2 = st.columns(2)
+
+with b1:
+
+    st.markdown(
+        metric_box(
+            "Losses",
+            stats["losses"]
+        ),
+        unsafe_allow_html=True
+    )
+
+with b2:
+
+    st.markdown(
+        metric_box(
+            "Win Rate",
+            f"{stats['win_rate']:.1f}%"
+        ),
+        unsafe_allow_html=True
+    )
+
+
+b1, b2 = st.columns(2)
+
+with b1:
+
+    st.markdown(
+        metric_box(
+            "Net Premium Points",
+            f"{stats['net_points']:.2f}"
+        ),
+        unsafe_allow_html=True
+    )
+
+with b2:
+
+    st.markdown(
+        metric_box(
+            "Target 1 / Target 2",
+            f"{stats['target1']} / {stats['target2']}"
+        ),
+        unsafe_allow_html=True
+    )
+
+
+# ============================================================
+# RECENT CLOSED TRADES
+# ============================================================
+
+st.markdown("### Recent Closed Trades")
+
+closed_trades = (
+    st.session_state.closed_trades
+)
+
+if len(closed_trades) == 0:
+
+    st.info(
+        "No closed trades found."
+    )
+
+else:
+
+    rows = []
+
+    for trade in reversed(
+        closed_trades[-10:]
+    ):
+
+        rows.append({
+
+            "Signal":
+                trade["signal"],
+
+            "Option":
+                trade["option_symbol"],
+
+            "Entry":
+                round(
+                    trade["option_entry"],
+                    2
+                ),
+
+            "Exit":
+                round(
+                    trade["exit_premium"],
+                    2
+                ),
+
+            "Points":
+                round(
+                    trade["points"],
+                    2
+                ),
+
+            "Target 1":
+                "YES"
+                if trade["target1_hit"]
+                else "NO",
+
+            "Exit Reason":
+                trade["exit_reason"]
+        })
+
+    trades_df = pd.DataFrame(
+        rows
+    )
+
+    st.dataframe(
+        trades_df,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# MANUAL CLOSE BUTTON
+# ============================================================
+
+if (
+    st.session_state.running_trade
+    is not None
+):
+
+    if st.button(
+        "🔴 Close Running Trade"
+    ):
+
+        trade = (
+            st.session_state.running_trade
+        )
+
+        trade["exit_reason"] = (
+            "MANUAL EXIT"
+        )
+
+        trade["exit_premium"] = (
+            trade["last_premium"]
+        )
+
+        close_running_trade()
+
+        st.rerun()
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.caption(
+    "Scalping scanner | "
+    "EMA 9 + EMA 15 + VWAP | "
+    "ATM/ITM Options Only | "
+    "1:1 → Breakeven Trailing SL"
+)
