@@ -1,3 +1,5 @@
-Flask
-yfinance
-gunicorn
+streamlit
+pandas
+numpy
+requests
+plotly
